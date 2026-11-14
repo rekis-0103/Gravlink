@@ -27,7 +27,7 @@ Gravlink runs as a single Go binary with an embedded React PWA. It binds directl
 
 ```mermaid
 flowchart LR
-  Phone["Phone Browser / PWA"] -->|HTTPS + WSS (LAN IP)| Gateway["Gravlink Server :8443<br/>IP Filter + Auth + CSRF"]
+  Phone["Phone Browser / PWA"] -->|HTTPS + WSS over LAN| Gateway["Gravlink Server :8443<br/>IP Filter + Auth + CSRF"]
   Gateway --> Transcripts["~/.gemini/antigravity/brain/<br/>transcript.jsonl & transcript_full.jsonl"]
   Gateway --> Hub["Antigravity Hub RPC / UI<br/>(hub_*.json + /healthz)"]
   Gateway --> Workspace["Workspace Files<br/>(Read-Only Explorer)"]
