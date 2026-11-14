@@ -20,13 +20,14 @@ import (
 
 	"gravlink/internal/agy"
 	"gravlink/internal/config"
+	"gravlink/internal/proxy"
 	"gravlink/internal/security"
 	"gravlink/internal/server"
 	"gravlink/internal/workspace"
 	"gravlink/web"
 )
 
-const version = "0.1.0-m1"
+const version = "0.2.0-m2"
 
 func main() {
 	if len(os.Args) < 2 {
@@ -154,6 +155,8 @@ func runStart(args []string) {
 		RateLimiter:   security.NewAuthRateLimiter(5, 15*time.Minute),
 		Audit:         audit,
 		Explorer:      exp,
+		Dispatcher:    agy.NewDispatcher(cfg.AntigravityDir),
+		HubProxy:      proxy.NewHubProxyHandler(cfg.AntigravityDir),
 		StrictSubnets: strictSubnets,
 		CACertPEM:     caPEM,
 		StaticFS:      staticFS,
