@@ -1,7 +1,17 @@
 import { MouseEvent, useEffect, useMemo, useRef, useState } from 'react';
 import DOMPurify from 'dompurify';
 import { marked, type Tokens } from 'marked';
-import { ArrowDown, Brain, ChevronRight, Wrench } from 'lucide-react';
+import {
+  ArrowDown,
+  Brain,
+  ChevronRight,
+  FileCode2,
+  Globe,
+  Search,
+  Terminal,
+  Wrench,
+} from 'lucide-react';
+import { escapeHtml, highlightSnippet } from '../lib/highlight';
 import type { TranscriptStep } from '../types';
 import type { StreamState } from '../hooks/useAgentStream';
 
@@ -11,21 +21,14 @@ interface AgentTimelineProps {
   conversationTitle: string;
 }
 
-function escapeHtml(str: string): string {
-  return str
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
-}
-
 marked.use({
   breaks: true,
   gfm: true,
   renderer: {
     code({ text, lang }: Tokens.Code) {
       const safeLang = escapeHtml((lang || 'code').trim().split(/\s+/)[0] || 'code');
-      return `<div class="code-block-wrap"><div class="code-block-bar"><span>${safeLang}</span><button type="button" class="code-copy-btn">Copy</button></div><pre><code>${escapeHtml(text)}</code></pre></div>`;
+      const highlighted = highlightSnippet(text, lang);
+      return `<div class="code-block-wrap"><div class="code-block-bar"><span class="code-lang-pill">${safeLang}</span><button type="button" class="code-copy-btn">Copy</button></div><pre><code class="hljs">${highlighted}</code></pre></div>`;
     },
   },
 });
@@ -42,7 +45,10 @@ function formatStepText(step: TranscriptStep): string {
 function renderSafeMarkdown(text: string): string {
   if (!text) return '';
   const html = marked.parse(text, { async: false }) as string;
-  return DOMPurify.sanitize(html, { ADD_TAGS: ['button'], ADD_ATTR: ['type', 'class'] });
+  return DOMPurify.sanitize(html, {
+    ADD_TAGS: ['button', 'span'],
+    ADD_ATTR: ['type', 'class'],
+  });
 }
 
 function formatArgs(args: unknown): string {
@@ -55,6 +61,23 @@ function formatArgs(args: unknown): string {
   }
 }
 
+function classifyTool(name: string) {
+  const lower = name.toLowerCase();
+  if (/(command|terminal|shell|exec|ps|bash)/.test(lower)) {
+    return { cls: 'tool-cmd', label: 'CMD', Icon: Terminal };
+  }
+  if (/(write|edit|replace|create|patch|save|delete)/.test(lower)) {
+    return { cls: 'tool-edit', label: 'EDIT', Icon: FileCode2 };
+  }
+  if (/(read|view|list|grep|find|search|outline)/.test(lower)) {
+    return { cls: 'tool-read', label: 'READ', Icon: Search };
+  }
+  if (/(web|browser|fetch|url|http|mcp)/.test(lower)) {
+    return { cls: 'tool-web', label: 'WEB', Icon: Globe };
+  }
+  return { cls: 'tool-other', label: 'TOOL', Icon: Wrench };
+}
+
 export function AgentTimeline({ steps, streamState, conversationTitle }: AgentTimelineProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const [pinnedToBottom, setPinnedToBottom] = useState(true);
@@ -63,12 +86,19 @@ export function AgentTimeline({ steps, streamState, conversationTitle }: AgentTi
   const visibleSteps = useMemo(() => {
     return steps.filter((s) => {
       const hasContent = Boolean(s.content?.trim());
+      const hasThinking = Boolean(s.thinking?.trim());
       const hasTools = Boolean(s.tool_calls?.length);
-      if (!hasContent && !hasTools) return false;
+      if (!hasContent && !hasThinking && !hasTools) return false;
       if (viewMode === 'chat') {
         return s.type === 'USER_INPUT' || (s.type === 'PLANNER_RESPONSE' && hasContent);
       }
-      return s.type === 'USER_INPUT' || s.type === 'PLANNER_RESPONSE' || hasContent || hasTools;
+      return (
+        s.type === 'USER_INPUT' ||
+        s.type === 'PLANNER_RESPONSE' ||
+        hasContent ||
+        hasThinking ||
+        hasTools
+      );
     });
   }, [steps, viewMode]);
 
@@ -143,6 +173,7 @@ export function AgentTimeline({ steps, streamState, conversationTitle }: AgentTi
           <div className="timeline-list" onClick={handleTimelineClick}>
             {visibleSteps.map((step) => {
               const isUser = step.type === 'USER_INPUT';
+              const isPlanner = step.type === 'PLANNER_RESPONSE';
               const isRunning = step.status !== 'DONE';
               const bodyText = formatStepText(step);
               const safeHtml = renderSafeMarkdown(bodyText);
@@ -169,21 +200,21 @@ export function AgentTimeline({ steps, streamState, conversationTitle }: AgentTi
               return (
                 <article
                   key={step.step_index}
-                  className={`msg-assistant ${isRunning ? 'running' : ''}`}
+                  className={`msg-assistant ${!isPlanner ? 'step-system' : ''} ${isRunning ? 'running' : ''}`}
                 >
                   <div className="msg-assistant-header">
                     <span className="step-badge">
-                      {isRunning && <span className="dot warn" aria-hidden="true" />}
-                      {step.type === 'PLANNER_RESPONSE' ? 'Antigravity' : step.type}
+                      {isRunning && <span className="dot live" aria-hidden="true" />}
+                      {isPlanner ? 'Antigravity' : step.type}
                     </span>
                     <span>
-                      {isRunning ? `${step.status} · ` : ''}
+                      {isRunning ? `${step.status || 'RUNNING'} · ` : ''}
                       {timeLabel}
                     </span>
                   </div>
 
                   {step.thinking && (
-                    <details className="thinking-box">
+                    <details className="thinking-box" open={isRunning && !bodyText}>
                       <summary>
                         <ChevronRight size={14} aria-hidden="true" />
                         <Brain size={14} aria-hidden="true" />
@@ -205,13 +236,28 @@ export function AgentTimeline({ steps, streamState, conversationTitle }: AgentTi
                     <div className="tool-chips" aria-label="Tool calls">
                       {step.tool_calls.map((tc, idx) => {
                         const argsText = formatArgs(tc.args);
+                        const { cls, label, Icon } = classifyTool(tc.name);
+                        const highlightedArgs = argsText ? highlightSnippet(argsText, 'json') : '';
                         return (
-                          <details key={`${step.step_index}-tc-${idx}`} className="tool-details">
+                          <details key={`${step.step_index}-tc-${idx}`} className={`tool-details ${cls}`}>
                             <summary>
-                              <Wrench size={12} aria-hidden="true" style={{ color: 'var(--accent)', flexShrink: 0 }} />
-                              <span>{tc.name}</span>
+                              <Icon size={13} aria-hidden="true" style={{ color: 'var(--tool-color)', flexShrink: 0 }} />
+                              <span className="tool-tag">{label}</span>
+                              <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>{tc.name}</span>
                             </summary>
-                            {argsText && <pre className="tool-args-pre">{argsText}</pre>}
+                            {argsText && (
+                              <pre className="tool-args-pre">
+                                <code
+                                  className="hljs"
+                                  dangerouslySetInnerHTML={{
+                                    __html: DOMPurify.sanitize(highlightedArgs, {
+                                      ADD_TAGS: ['span'],
+                                      ADD_ATTR: ['class'],
+                                    }),
+                                  }}
+                                />
+                              </pre>
+                            )}
                           </details>
                         );
                       })}
