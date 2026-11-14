@@ -29,6 +29,8 @@ type Dependencies struct {
 	RateLimiter   *security.AuthRateLimiter
 	Audit         *security.AuditLogger
 	Explorer      *workspace.Explorer
+	Dispatcher    *agy.Dispatcher
+	HubProxy      http.Handler
 	StrictSubnets []*net.IPNet
 	CACertPEM     []byte
 	StaticFS      fs.FS
@@ -42,6 +44,9 @@ type wsEvent struct {
 
 // NewRouter builds the full LAN-secured HTTP/WebSocket handler.
 func NewRouter(deps Dependencies) http.Handler {
+	if deps.Dispatcher == nil && deps.Config != nil {
+		deps.Dispatcher = agy.NewDispatcher(deps.Config.AntigravityDir)
+	}
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /ca.crt", func(w http.ResponseWriter, r *http.Request) {
@@ -82,11 +87,19 @@ func NewRouter(deps Dependencies) http.Handler {
 
 	mux.HandleFunc("GET /api/status", deps.Sessions.RequireAuth(deps.Audit, handleStatus(deps)))
 	mux.HandleFunc("GET /api/doctor", deps.Sessions.RequireAuth(deps.Audit, handleDoctor(deps)))
+	mux.HandleFunc("GET /api/models", deps.Sessions.RequireAuth(deps.Audit, handleModels(deps)))
 	mux.HandleFunc("GET /api/conversations", deps.Sessions.RequireAuth(deps.Audit, handleConversations(deps)))
 	mux.HandleFunc("GET /api/conversations/{id}/steps", deps.Sessions.RequireAuth(deps.Audit, handleConversationSteps(deps)))
+	mux.HandleFunc("POST /api/conversations/{id}/prompt", deps.Sessions.RequireAuth(deps.Audit, handleSendPrompt(deps)))
+	mux.HandleFunc("GET /api/conversations/{id}/pending", deps.Sessions.RequireAuth(deps.Audit, handlePendingInteractions(deps)))
+	mux.HandleFunc("POST /api/conversations/{id}/interact", deps.Sessions.RequireAuth(deps.Audit, handleInteract(deps)))
 	mux.HandleFunc("GET /api/ws/conversations/{id}", handleConversationWS(deps))
 	mux.HandleFunc("GET /api/workspace/tree", deps.Sessions.RequireAuth(deps.Audit, handleWorkspaceTree(deps)))
 	mux.HandleFunc("GET /api/workspace/file", deps.Sessions.RequireAuth(deps.Audit, handleWorkspaceFile(deps)))
+	mux.HandleFunc("/hub/", handleHubProxy(deps))
+	mux.HandleFunc("GET /hub", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/hub/", http.StatusMovedPermanently)
+	})
 
 	if deps.StaticFS != nil {
 		mux.Handle("/", spaHandler(deps.StaticFS))
@@ -246,7 +259,223 @@ func handleConversations(deps Dependencies) func(http.ResponseWriter, *http.Requ
 			http.Error(w, "Failed to list conversations", http.StatusInternalServerError)
 			return
 		}
+		if deps.Dispatcher != nil {
+			ctx, cancel := context.WithTimeout(r.Context(), 1500*time.Millisecond)
+			summaries, hubErr := deps.Dispatcher.GetAllTrajectories(ctx)
+			cancel()
+			if hubErr == nil && len(summaries) > 0 {
+				for i := range convs {
+					if ts, ok := summaries[convs[i].ID]; ok {
+						if strings.TrimSpace(ts.Summary) != "" {
+							convs[i].Title = ts.Summary
+						}
+						if strings.TrimSpace(ts.Status) != "" {
+							convs[i].LastStatus = ts.Status
+						}
+					}
+				}
+			}
+		}
 		writeJSON(w, http.StatusOK, map[string]any{"conversations": convs})
+	}
+}
+
+func handleModels(deps Dependencies) func(http.ResponseWriter, *http.Request, *security.SessionClaims) {
+	return func(w http.ResponseWriter, r *http.Request, _ *security.SessionClaims) {
+		if deps.Dispatcher == nil {
+			writeJSON(w, http.StatusOK, map[string]any{"models": []agy.ModelOption{}})
+			return
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+		defer cancel()
+		models := deps.Dispatcher.ListModels(ctx)
+		writeJSON(w, http.StatusOK, map[string]any{"models": models})
+	}
+}
+
+func handleSendPrompt(deps Dependencies) func(http.ResponseWriter, *http.Request, *security.SessionClaims) {
+	return func(w http.ResponseWriter, r *http.Request, _ *security.SessionClaims) {
+		if deps.Dispatcher == nil {
+			http.Error(w, "Dispatcher unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		convID := r.PathValue("id")
+		if convID == "new" {
+			convID = ""
+		} else if !agy.IsValidConversationID(convID) {
+			http.Error(w, "Invalid conversation ID", http.StatusBadRequest)
+			return
+		}
+
+		var body struct {
+			Prompt string `json:"prompt"`
+			Mode   string `json:"mode,omitempty"`
+			Model  string `json:"model,omitempty"`
+		}
+		if err := json.NewDecoder(io.LimitReader(r.Body, 64*1024)).Decode(&body); err != nil {
+			http.Error(w, "Invalid JSON payload", http.StatusBadRequest)
+			return
+		}
+		if strings.TrimSpace(body.Prompt) == "" {
+			http.Error(w, "Prompt cannot be empty", http.StatusBadRequest)
+			return
+		}
+
+		var wsRoot string
+		if deps.Explorer != nil {
+			wsRoot = deps.Explorer.Root()
+		}
+		req := agy.PromptRequest{
+			ConversationID: convID,
+			Prompt:         body.Prompt,
+			Mode:           body.Mode,
+			Model:          body.Model,
+			Workspace:      wsRoot,
+		}
+		newConvID, backend, err := deps.Dispatcher.SendPrompt(r.Context(), req)
+		if err != nil {
+			if deps.Audit != nil {
+				deps.Audit.Log(security.AuditEvent{
+					Event:    "prompt_failed",
+					ClientIP: r.RemoteAddr,
+					Method:   r.Method,
+					Path:     r.URL.Path,
+					Outcome:  "error",
+					Detail:   err.Error(),
+				})
+			}
+			http.Error(w, "Failed to dispatch prompt: "+err.Error(), http.StatusBadGateway)
+			return
+		}
+		if deps.Audit != nil {
+			deps.Audit.Log(security.AuditEvent{
+				Event:    "prompt_submitted",
+				ClientIP: r.RemoteAddr,
+				Method:   r.Method,
+				Path:     r.URL.Path,
+				Outcome:  "success",
+				Detail:   "conversation=" + newConvID + " via=" + backend,
+			})
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"conversation_id": newConvID,
+			"backend":         backend,
+		})
+	}
+}
+
+func handlePendingInteractions(deps Dependencies) func(http.ResponseWriter, *http.Request, *security.SessionClaims) {
+	return func(w http.ResponseWriter, r *http.Request, _ *security.SessionClaims) {
+		convID := r.PathValue("id")
+		if !agy.IsValidConversationID(convID) {
+			http.Error(w, "Invalid conversation ID", http.StatusBadRequest)
+			return
+		}
+		if deps.Dispatcher == nil {
+			writeJSON(w, http.StatusOK, map[string]any{"pending": []agy.PendingInteraction{}, "status": ""})
+			return
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), 4*time.Second)
+		defer cancel()
+		pending, status, err := deps.Dispatcher.GetPendingInteractions(ctx, convID)
+		if err != nil {
+			writeJSON(w, http.StatusOK, map[string]any{
+				"pending": []agy.PendingInteraction{},
+				"status":  status,
+				"error":   err.Error(),
+			})
+			return
+		}
+		if pending == nil {
+			pending = []agy.PendingInteraction{}
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"pending": pending,
+			"status":  status,
+		})
+	}
+}
+
+func handleInteract(deps Dependencies) func(http.ResponseWriter, *http.Request, *security.SessionClaims) {
+	return func(w http.ResponseWriter, r *http.Request, _ *security.SessionClaims) {
+		if deps.Dispatcher == nil {
+			http.Error(w, "Dispatcher unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		convID := r.PathValue("id")
+		if !agy.IsValidConversationID(convID) {
+			http.Error(w, "Invalid conversation ID", http.StatusBadRequest)
+			return
+		}
+		var req agy.InteractionRequest
+		if err := json.NewDecoder(io.LimitReader(r.Body, 16*1024)).Decode(&req); err != nil {
+			http.Error(w, "Invalid JSON payload", http.StatusBadRequest)
+			return
+		}
+		if strings.TrimSpace(req.TrajectoryID) == "" || req.StepIndex < 0 {
+			http.Error(w, "Missing trajectory_id or valid step_index", http.StatusBadRequest)
+			return
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), 8*time.Second)
+		defer cancel()
+		err := deps.Dispatcher.RespondInteraction(ctx, convID, req)
+		eventName := "interaction_rejected"
+		if req.Allow {
+			eventName = "interaction_approved"
+		}
+		if err != nil {
+			if deps.Audit != nil {
+				deps.Audit.Log(security.AuditEvent{
+					Event:    eventName,
+					ClientIP: r.RemoteAddr,
+					Method:   r.Method,
+					Path:     r.URL.Path,
+					Outcome:  "error",
+					Detail:   err.Error(),
+				})
+			}
+			http.Error(w, "Failed to respond to interaction: "+err.Error(), http.StatusBadGateway)
+			return
+		}
+		if deps.Audit != nil {
+			deps.Audit.Log(security.AuditEvent{
+				Event:    eventName,
+				ClientIP: r.RemoteAddr,
+				Method:   r.Method,
+				Path:     r.URL.Path,
+				Outcome:  "success",
+				Detail:   "conversation=" + convID + " step=" + strconv.Itoa(req.StepIndex),
+			})
+		}
+		writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+	}
+}
+
+func handleHubProxy(deps Dependencies) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !security.ValidateSameOrigin(r) {
+			if deps.Audit != nil {
+				deps.Audit.Log(security.AuditEvent{
+					Event:    "origin_mismatch",
+					ClientIP: r.RemoteAddr,
+					Method:   r.Method,
+					Path:     r.URL.Path,
+					Outcome:  "denied",
+					Detail:   r.Header.Get("Origin"),
+				})
+			}
+			http.Error(w, "Forbidden: origin mismatch", http.StatusForbidden)
+			return
+		}
+		if _, ok := deps.Sessions.VerifyRequest(r); !ok {
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+		if deps.HubProxy == nil {
+			http.Error(w, "Antigravity Hub proxy disabled", http.StatusServiceUnavailable)
+			return
+		}
+		deps.HubProxy.ServeHTTP(w, r)
 	}
 }
 
@@ -458,7 +687,7 @@ func spaHandler(staticFS fs.FS) http.Handler {
 func securityHeadersMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
-		w.Header().Set("X-Frame-Options", "DENY")
+		w.Header().Set("X-Frame-Options", "SAMEORIGIN")
 		w.Header().Set("Referrer-Policy", "no-referrer")
 		next.ServeHTTP(w, r)
 	})
