@@ -16,7 +16,12 @@ type DoctorCheck struct {
 
 // RunDoctor executes contract and environment checks against the local Antigravity installation.
 func RunDoctor(ctx context.Context, antigravityDir, workspace string) []DoctorCheck {
-	checks := make([]DoctorCheck, 0, 5)
+	return RunDoctorWithPatches(ctx, antigravityDir, workspace, "")
+}
+
+// RunDoctorWithPatches runs all Antigravity compatibility checks plus external hot-reload patch directory status.
+func RunDoctorWithPatches(ctx context.Context, antigravityDir, workspace, patchDir string) []DoctorCheck {
+	checks := make([]DoctorCheck, 0, 6)
 
 	// 1. Antigravity data directory
 	if info, err := os.Stat(antigravityDir); err != nil || !info.IsDir() {
@@ -121,5 +126,42 @@ func RunDoctor(ctx context.Context, antigravityDir, workspace string) []DoctorCh
 		}
 	}
 
+	// 6. External hot-reloadable patches (Milestone 4)
+	checks = append(checks, CheckExternalPatches(patchDir))
+
 	return checks
+}
+
+// CheckExternalPatches verifies whether external mobile-hub CSS/JS overrides exist on disk.
+func CheckExternalPatches(patchDir string) DoctorCheck {
+	if patchDir == "" {
+		if home, err := os.UserHomeDir(); err == nil {
+			patchDir = filepath.Join(home, ".gravlink", "patches")
+		}
+	}
+	if patchDir == "" {
+		return DoctorCheck{
+			Name:   "external_patches",
+			Status: "PASS",
+			Detail: "using embedded mobile-hub patches",
+		}
+	}
+	var overrides []string
+	for _, name := range []string{"mobile-hub.css", "mobile-hub.js"} {
+		if info, err := os.Stat(filepath.Join(patchDir, name)); err == nil && !info.IsDir() {
+			overrides = append(overrides, name)
+		}
+	}
+	if len(overrides) > 0 {
+		return DoctorCheck{
+			Name:   "external_patches",
+			Status: "PASS",
+			Detail: fmt.Sprintf("hot-reload overrides active in %s (%v)", patchDir, overrides),
+		}
+	}
+	return DoctorCheck{
+		Name:   "external_patches",
+		Status: "PASS",
+		Detail: fmt.Sprintf("embedded fallback active (drop overrides into %s)", patchDir),
+	}
 }
