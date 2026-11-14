@@ -363,27 +363,27 @@ pre, code {
 
 .bottom-nav {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 0.25rem;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 0.15rem;
   background: color-mix(in srgb, var(--surface) 96%, transparent);
   backdrop-filter: blur(12px);
   -webkit-backdrop-filter: blur(12px);
   border-top: 1px solid var(--border);
   padding-top: 0.3rem;
   padding-bottom: max(0.35rem, env(safe-area-inset-bottom, 0px));
-  padding-left: max(0.4rem, env(safe-area-inset-left, 0px));
-  padding-right: max(0.4rem, env(safe-area-inset-right, 0px));
+  padding-left: max(0.3rem, env(safe-area-inset-left, 0px));
+  padding-right: max(0.3rem, env(safe-area-inset-right, 0px));
   z-index: 15;
 }
 
 .bottom-nav button {
   flex-direction: column;
-  gap: 0.12rem;
-  font-size: 0.7rem;
+  gap: 0.1rem;
+  font-size: 0.68rem;
   border: none;
   background: transparent;
   color: var(--muted);
-  padding: 0.3rem 0.2rem;
+  padding: 0.3rem 0.15rem;
   border-radius: 12px;
   min-inline-size: 0;
 }
@@ -1051,6 +1051,81 @@ details.thinking-box summary {
   min-block-size: 0;
   border: none;
   background: var(--bg);
+}
+
+/* Local Dev Server Preview Toolbar */
+.preview-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.45rem;
+  padding: 0.45rem 0.6rem;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+}
+
+.preview-port-form {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  flex: 1;
+  min-inline-size: 0;
+}
+
+.preview-port-input {
+  width: 96px;
+  min-inline-size: 0;
+  min-block-size: 36px;
+  padding: 0.25rem 0.55rem;
+  border-radius: 9px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text);
+  font-family: ui-monospace, monospace;
+}
+
+.preview-ext-link {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-block-size: 36px;
+  min-inline-size: 36px;
+  padding: 0.3rem 0.5rem;
+  border-radius: 9px;
+  border: 1px solid var(--border);
+  background: var(--surface-alt);
+  color: var(--accent);
+  text-decoration: none;
+}
+
+.preview-chips-row {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.4rem 0.6rem;
+  overflow-x: auto;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  scrollbar-width: none;
+}
+
+.preview-chips-row::-webkit-scrollbar {
+  display: none;
+}
+
+.preview-chip {
+  min-block-size: 34px;
+  padding: 0.2rem 0.6rem;
+  border-radius: 999px;
+  font-size: 0.76rem;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.preview-chip.active {
+  background: color-mix(in srgb, var(--accent) 16%, var(--surface));
+  border-color: var(--accent);
+  color: var(--accent);
 }
 
 /* Code Explorer with Container Query Split Layout */

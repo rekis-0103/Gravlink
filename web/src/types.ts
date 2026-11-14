@@ -86,6 +86,12 @@ export interface PendingResponse {
   error?: string;
 }
 
+export interface DevServerPort {
+  port: number;
+  label: string;
+  active: boolean;
+}
+
 export interface SystemStatus {
   workspace: string;
   hubs: HubInfo[];

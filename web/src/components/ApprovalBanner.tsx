@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { api } from '../api';
 import type { PendingInteraction } from '../types';
 
@@ -6,22 +6,26 @@ interface ApprovalBannerProps {
   conversationId: string;
   onResolved: () => void;
   onOpenHub: () => void;
+  onPendingAppear?: (interaction: PendingInteraction) => void;
 }
 
 export function ApprovalBanner({
   conversationId,
   onResolved,
   onOpenHub,
+  onPendingAppear,
 }: ApprovalBannerProps) {
   const [pending, setPending] = useState<PendingInteraction[]>([]);
   const [busy, setBusy] = useState(false);
   const [confirmApprove, setConfirmApprove] = useState(false);
   const [errMsg, setErrMsg] = useState<string | null>(null);
+  const seenKeysRef = useRef<Set<string>>(new Set());
 
   useEffect(() => {
     setPending([]);
     setConfirmApprove(false);
     setErrMsg(null);
+    seenKeysRef.current.clear();
     if (!conversationId) return;
 
     let cancelled = false;
@@ -30,7 +34,15 @@ export function ApprovalBanner({
       try {
         const res = await api.pending(conversationId);
         if (!cancelled) {
-          setPending(res.pending || []);
+          const list = res.pending || [];
+          setPending(list);
+          for (const item of list) {
+            const k = `${item.cascade_id}:${item.step_index}`;
+            if (!seenKeysRef.current.has(k)) {
+              seenKeysRef.current.add(k);
+              onPendingAppear?.(item);
+            }
+          }
         }
       } catch {
         /* ignore transient polling failures */

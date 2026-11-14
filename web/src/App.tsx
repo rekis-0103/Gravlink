@@ -1,7 +1,10 @@
 import { useEffect, useRef, useState } from 'react';
 import {
   Activity,
+  Bell,
+  BellOff,
   Code2,
+  Eye,
   Globe,
   LogOut,
   Menu,
@@ -20,11 +23,13 @@ import { CodeExplorer } from './components/CodeExplorer';
 import { DiagnosticsView } from './components/DiagnosticsView';
 import { HubFrameView } from './components/HubFrameView';
 import { LoginView } from './components/LoginView';
+import { PreviewView } from './components/PreviewView';
 import { PromptComposer } from './components/PromptComposer';
+import { useAgentNotifications } from './hooks/useAgentNotifications';
 import { useAgentStream } from './hooks/useAgentStream';
 import type { ConversationSummary } from './types';
 
-type Tab = 'agent' | 'code' | 'hub' | 'status';
+type Tab = 'agent' | 'code' | 'preview' | 'hub' | 'status';
 type ThemeMode = 'system' | 'light' | 'dark';
 
 function readStoredTheme(): ThemeMode {
@@ -132,6 +137,21 @@ export function App() {
   }, [authenticated]);
 
   const { steps, streamState } = useAgentStream(authenticated ? activeConvId : null);
+  const { alertsEnabled, toggleAlerts, notify } = useAgentNotifications();
+  const prevRunningConvRef = useRef<{ convId: string | null; running: boolean }>({
+    convId: null,
+    running: false,
+  });
+
+  useEffect(() => {
+    const hasRunning = steps.some((s) => s.status && s.status !== 'DONE');
+    const prev = prevRunningConvRef.current;
+    if (prev.convId === activeConvId && prev.running && !hasRunning && steps.length > 0) {
+      const label = conversations.find((c) => c.id === activeConvId)?.title || 'Antigravity';
+      notify('Antigravity Ready', `${label} finished`, 'done');
+    }
+    prevRunningConvRef.current = { convId: activeConvId, running: hasRunning };
+  }, [steps, activeConvId, conversations, notify]);
 
   if (!authChecked) {
     return (
@@ -235,6 +255,13 @@ export function App() {
               conversationId={activeConvId || ''}
               onResolved={() => void loadConversations(false)}
               onOpenHub={() => setTab('hub')}
+              onPendingAppear={(item) =>
+                notify(
+                  'Approval Required',
+                  item.command_line || item.resource || item.tool_name || 'Action needs approval',
+                  'approval'
+                )
+              }
             />
             <PromptComposer
               conversationId={activeConvId || ''}
@@ -249,6 +276,7 @@ export function App() {
           </>
         )}
         {tab === 'code' && <CodeExplorer />}
+        {tab === 'preview' && <PreviewView />}
         {tab === 'hub' && <HubFrameView />}
         {tab === 'status' && <DiagnosticsView />}
       </main>
@@ -259,7 +287,7 @@ export function App() {
           className={tab === 'agent' ? 'active' : ''}
           onClick={() => setTab('agent')}
         >
-          <MessageSquare size={19} aria-hidden="true" />
+          <MessageSquare size={18} aria-hidden="true" />
           <span>Chat</span>
         </button>
         <button
@@ -267,15 +295,23 @@ export function App() {
           className={tab === 'code' ? 'active' : ''}
           onClick={() => setTab('code')}
         >
-          <Code2 size={19} aria-hidden="true" />
+          <Code2 size={18} aria-hidden="true" />
           <span>Code</span>
+        </button>
+        <button
+          type="button"
+          className={tab === 'preview' ? 'active' : ''}
+          onClick={() => setTab('preview')}
+        >
+          <Eye size={18} aria-hidden="true" />
+          <span>Preview</span>
         </button>
         <button
           type="button"
           className={tab === 'hub' ? 'active' : ''}
           onClick={() => setTab('hub')}
         >
-          <Globe size={19} aria-hidden="true" />
+          <Globe size={18} aria-hidden="true" />
           <span>Hub</span>
         </button>
         <button
@@ -283,7 +319,7 @@ export function App() {
           className={tab === 'status' ? 'active' : ''}
           onClick={() => setTab('status')}
         >
-          <Activity size={19} aria-hidden="true" />
+          <Activity size={18} aria-hidden="true" />
           <span>Doctor</span>
         </button>
       </nav>
@@ -382,6 +418,11 @@ export function App() {
                 </button>
               </div>
             </div>
+
+            <button type="button" style={{ width: '100%' }} onClick={() => void toggleAlerts()}>
+              {alertsEnabled ? <Bell size={16} aria-hidden="true" /> : <BellOff size={16} aria-hidden="true" />}
+              {alertsEnabled ? 'Mobile Alerts: ON' : 'Enable Mobile Alerts'}
+            </button>
 
             <button type="button" style={{ width: '100%' }} onClick={handleLogout}>
               <LogOut size={16} aria-hidden="true" />

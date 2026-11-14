@@ -1,6 +1,7 @@
 import type {
   AuthStatus,
   ConversationSummary,
+  DevServerPort,
   DoctorCheck,
   FileContent,
   ModelOption,
@@ -104,4 +105,5 @@ export const api = {
       },
       12000
     ),
+  previewPorts: () => request<{ ports: DevServerPort[] }>('/api/preview/ports'),
 };
