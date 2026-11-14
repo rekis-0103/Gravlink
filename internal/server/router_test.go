@@ -512,4 +512,22 @@ func TestRouterMilestone3And4PreviewAndExternalPatches(t *testing.T) {
 	if badPatchRec.Code != http.StatusNotFound {
 		t.Fatalf("expected 404 for unknown patch asset, got %d", badPatchRec.Code)
 	}
+
+	// 8. Token usage report requires auth and returns JSON metrics
+	unauthTok := httptest.NewRequest(http.MethodGet, "/api/tokens", nil)
+	unauthTok.RemoteAddr = "192.168.1.40:2222"
+	unauthTokRec := httptest.NewRecorder()
+	handler.ServeHTTP(unauthTokRec, unauthTok)
+	if unauthTokRec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 on unauthenticated /api/tokens, got %d", unauthTokRec.Code)
+	}
+
+	tokReq := httptest.NewRequest(http.MethodGet, "/api/tokens", nil)
+	tokReq.RemoteAddr = "192.168.1.40:2222"
+	tokReq.AddCookie(cookie)
+	tokRec := httptest.NewRecorder()
+	handler.ServeHTTP(tokRec, tokReq)
+	if tokRec.Code != http.StatusOK || !strings.Contains(tokRec.Body.String(), `"total_tokens"`) {
+		t.Fatalf("expected token usage JSON, got %d (%s)", tokRec.Code, tokRec.Body.String())
+	}
 }

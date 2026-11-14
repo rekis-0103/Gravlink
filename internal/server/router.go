@@ -100,6 +100,7 @@ func NewRouter(deps Dependencies) http.Handler {
 	mux.HandleFunc("GET /api/status", deps.Sessions.RequireAuth(deps.Audit, handleStatus(deps)))
 	mux.HandleFunc("GET /api/doctor", deps.Sessions.RequireAuth(deps.Audit, handleDoctor(deps)))
 	mux.HandleFunc("GET /api/models", deps.Sessions.RequireAuth(deps.Audit, handleModels(deps)))
+	mux.HandleFunc("GET /api/tokens", deps.Sessions.RequireAuth(deps.Audit, handleTokenUsage(deps)))
 	mux.HandleFunc("GET /api/conversations", deps.Sessions.RequireAuth(deps.Audit, handleConversations(deps)))
 	mux.HandleFunc("GET /api/conversations/{id}/steps", deps.Sessions.RequireAuth(deps.Audit, handleConversationSteps(deps)))
 	mux.HandleFunc("POST /api/conversations/{id}/prompt", deps.Sessions.RequireAuth(deps.Audit, handleSendPrompt(deps)))
@@ -270,6 +271,19 @@ func handleDoctor(deps Dependencies) func(http.ResponseWriter, *http.Request, *s
 	}
 }
 
+func lookupHubSummaries(ctx context.Context, deps Dependencies) map[string]agy.TrajectorySummary {
+	if deps.Dispatcher == nil {
+		return nil
+	}
+	hCtx, cancel := context.WithTimeout(ctx, 1500*time.Millisecond)
+	defer cancel()
+	summaries, err := deps.Dispatcher.GetAllTrajectories(hCtx)
+	if err != nil {
+		return nil
+	}
+	return summaries
+}
+
 func handleConversations(deps Dependencies) func(http.ResponseWriter, *http.Request, *security.SessionClaims) {
 	return func(w http.ResponseWriter, r *http.Request, _ *security.SessionClaims) {
 		convs, err := agy.ListConversations(deps.Config.AntigravityDir, 30)
@@ -277,24 +291,42 @@ func handleConversations(deps Dependencies) func(http.ResponseWriter, *http.Requ
 			http.Error(w, "Failed to list conversations", http.StatusInternalServerError)
 			return
 		}
-		if deps.Dispatcher != nil {
-			ctx, cancel := context.WithTimeout(r.Context(), 1500*time.Millisecond)
-			summaries, hubErr := deps.Dispatcher.GetAllTrajectories(ctx)
-			cancel()
-			if hubErr == nil && len(summaries) > 0 {
-				for i := range convs {
-					if ts, ok := summaries[convs[i].ID]; ok {
-						if strings.TrimSpace(ts.Summary) != "" {
-							convs[i].Title = ts.Summary
-						}
-						if strings.TrimSpace(ts.Status) != "" {
-							convs[i].LastStatus = ts.Status
-						}
+		if summaries := lookupHubSummaries(r.Context(), deps); len(summaries) > 0 {
+			for i := range convs {
+				if ts, ok := summaries[convs[i].ID]; ok {
+					if strings.TrimSpace(ts.Summary) != "" {
+						convs[i].Title = ts.Summary
+					}
+					if strings.TrimSpace(ts.Status) != "" {
+						convs[i].LastStatus = ts.Status
 					}
 				}
 			}
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"conversations": convs})
+	}
+}
+
+func handleTokenUsage(deps Dependencies) func(http.ResponseWriter, *http.Request, *security.SessionClaims) {
+	return func(w http.ResponseWriter, r *http.Request, _ *security.SessionClaims) {
+		report, err := agy.ComputeTokenUsage(deps.Config.AntigravityDir, 40)
+		if err != nil {
+			http.Error(w, "Failed to compute token usage", http.StatusInternalServerError)
+			return
+		}
+		if summaries := lookupHubSummaries(r.Context(), deps); len(summaries) > 0 {
+			for i := range report.Sessions {
+				if ts, ok := summaries[report.Sessions[i].ID]; ok {
+					if strings.TrimSpace(ts.Summary) != "" {
+						report.Sessions[i].Title = ts.Summary
+					}
+					if strings.TrimSpace(ts.Status) != "" {
+						report.Sessions[i].LastStatus = ts.Status
+					}
+				}
+			}
+		}
+		writeJSON(w, http.StatusOK, report)
 	}
 }
 
@@ -622,11 +654,15 @@ func handleConversationWS(deps Dependencies) http.HandlerFunc {
 			if len(steps) == 0 && eventType == "delta" {
 				return nil
 			}
-			for _, s := range steps {
-				if s.Status == "DONE" && s.StepIndex >= nextIndex {
-					nextIndex = s.StepIndex + 1
-				} else if s.Status != "DONE" {
+			for i, s := range steps {
+				isLast := i == len(steps)-1
+				st := strings.ToUpper(strings.TrimSpace(s.Status))
+				isActiveTail := isLast && (st == "RUNNING" || st == "PENDING" || st == "GENERATING" || st == "WAITING" || st == "IN_PROGRESS" || st == "STREAMING")
+				if isActiveTail {
 					break
+				}
+				if s.StepIndex >= nextIndex {
+					nextIndex = s.StepIndex + 1
 				}
 			}
 			payload, err := json.Marshal(wsEvent{
