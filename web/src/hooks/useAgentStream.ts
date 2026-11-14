@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { api } from '../api';
+import { isActiveStepStatus } from '../lib/agentStatus';
 import type { TranscriptStep } from '../types';
 
 export type StreamState = 'idle' | 'connecting' | 'live' | 'polling' | 'reconnecting' | 'error';
@@ -8,6 +9,44 @@ interface WsPayload {
   type: 'snapshot' | 'delta' | 'error';
   steps?: TranscriptStep[];
   error?: string;
+}
+
+function mergeDeltaSteps(prev: TranscriptStep[], incoming: TranscriptStep[]): TranscriptStep[] {
+  if (incoming.length === 0) return prev;
+  const map = new Map<number, TranscriptStep>();
+  for (const s of prev) map.set(s.step_index, s);
+  let changed = false;
+  for (const s of incoming) {
+    const old = map.get(s.step_index);
+    if (
+      !old ||
+      old.status !== s.status ||
+      old.content !== s.content ||
+      old.thinking !== s.thinking ||
+      (old.tool_calls?.length ?? 0) !== (s.tool_calls?.length ?? 0) ||
+      old.output_tokens !== s.output_tokens
+    ) {
+      changed = true;
+    }
+    map.set(s.step_index, s);
+  }
+  if (!changed) return prev;
+  return Array.from(map.values()).sort((a, b) => a.step_index - b.step_index);
+}
+
+function advanceCursor(steps: TranscriptStep[], currentCursor: number): number {
+  let cursor = currentCursor;
+  for (let i = 0; i < steps.length; i++) {
+    const s = steps[i];
+    const isLast = i === steps.length - 1;
+    if (isLast && isActiveStepStatus(s.status)) {
+      break;
+    }
+    if (s.step_index >= cursor) {
+      cursor = s.step_index + 1;
+    }
+  }
+  return cursor;
 }
 
 export function useAgentStream(conversationId: string | null) {
@@ -27,6 +66,7 @@ export function useAgentStream(conversationId: string | null) {
     let ws: WebSocket | null = null;
     let attempt = 0;
     let wsOpened = false;
+    let pollCursor = 0;
 
     const clearTimers = () => {
       if (retryTimer.current !== null) {
@@ -43,24 +83,31 @@ export function useAgentStream(conversationId: string | null) {
       if (cancelled || pollTimer.current !== null) return;
       setStreamState('polling');
 
-      const fetchSteps = async () => {
-        if (cancelled) return;
+      const fetchSteps = async (initial: boolean) => {
+        if (cancelled || (!initial && document.hidden)) return;
         try {
-          const res = await api.steps(conversationId);
-          if (!cancelled) {
-            setSteps(res.steps ?? []);
-            setStreamState('polling');
+          const fromIdx = initial ? 0 : pollCursor;
+          const res = await api.steps(conversationId, fromIdx);
+          if (cancelled) return;
+          const incoming = res.steps ?? [];
+          if (initial) {
+            setSteps(incoming);
+            pollCursor = advanceCursor(incoming, 0);
+          } else if (incoming.length > 0) {
+            setSteps((prev) => mergeDeltaSteps(prev, incoming));
+            pollCursor = advanceCursor(incoming, pollCursor);
           }
+          setStreamState('polling');
         } catch {
           if (!cancelled) setStreamState('error');
         }
       };
 
-      await fetchSteps();
+      await fetchSteps(true);
       if (!cancelled) {
         pollTimer.current = window.setInterval(() => {
-          void fetchSteps();
-        }, 1500);
+          void fetchSteps(false);
+        }, 1600);
       }
     };
 
@@ -93,12 +140,7 @@ export function useAgentStream(conversationId: string | null) {
           if (msg.type === 'snapshot') {
             setSteps(msg.steps ?? []);
           } else if (msg.type === 'delta' && msg.steps && msg.steps.length > 0) {
-            setSteps((prev) => {
-              const map = new Map<number, TranscriptStep>();
-              for (const s of prev) map.set(s.step_index, s);
-              for (const s of msg.steps ?? []) map.set(s.step_index, s);
-              return Array.from(map.values()).sort((a, b) => a.step_index - b.step_index);
-            });
+            setSteps((prev) => mergeDeltaSteps(prev, msg.steps ?? []));
           }
         } catch {
           // Ignore malformed frame
@@ -108,8 +150,6 @@ export function useAgentStream(conversationId: string | null) {
       ws.onclose = () => {
         if (cancelled) return;
         attempt += 1;
-        // If WebSocket never opened after 2 attempts (e.g. iOS Safari rejecting untrusted wss:// cert),
-        // fall back cleanly to HTTPS polling so updates continue live.
         if (!wsOpened && attempt >= 2) {
           void startPollingFallback();
           return;
@@ -120,20 +160,18 @@ export function useAgentStream(conversationId: string | null) {
       };
 
       ws.onerror = () => {
-        if (cancelled) return;
-        if (!wsOpened && attempt >= 1) {
-          ws?.close();
-        }
+        ws?.close();
       };
     };
 
-    setSteps([]);
     connect();
 
     return () => {
       cancelled = true;
       clearTimers();
-      ws?.close();
+      if (ws && ws.readyState < WebSocket.CLOSING) {
+        ws.close();
+      }
     };
   }, [conversationId]);
 
