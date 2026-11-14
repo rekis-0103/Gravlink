@@ -3,4 +3,7 @@ web/node_modules/
 web/dist/
 *.tsbuildinfo
 *.log
+*.exe~
+PLAN.md
+
 
