@@ -27,7 +27,9 @@ type TranscriptStep struct {
 	ToolCalls       []ToolCall `json:"tool_calls,omitempty"`
 	TruncatedFields []string   `json:"truncated_fields,omitempty"`
 	InputTokens     int        `json:"input_tokens,omitempty"`
+	CacheReadTokens int        `json:"cache_read_tokens,omitempty"`
 	OutputTokens    int        `json:"output_tokens,omitempty"`
+	Error           string     `json:"error,omitempty"`
 }
 
 // TranscriptPath returns the canonical path to transcript.jsonl or transcript_full.jsonl.
