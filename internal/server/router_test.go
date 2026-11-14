@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -12,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"testing/fstest"
 	"time"
 
 	"github.com/coder/websocket"
@@ -398,5 +400,116 @@ func TestRouterMilestone2PromptApprovalAndHubProxy(t *testing.T) {
 	auditText := string(auditBytes)
 	if !strings.Contains(auditText, `"prompt_submitted"`) || !strings.Contains(auditText, `"interaction_approved"`) {
 		t.Fatalf("expected prompt_submitted & interaction_approved in audit log: %s", auditText)
+	}
+}
+
+func TestRouterMilestone3And4PreviewAndExternalPatches(t *testing.T) {
+	devSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		_, _ = w.Write([]byte(`<html><head></head><body><script src="/main.tsx"></script></body></html>`))
+	}))
+	defer devSrv.Close()
+
+	_, devPortStr, _ := net.SplitHostPort(devSrv.Listener.Addr().String())
+	devPort, _ := strconv.Atoi(devPortStr)
+
+	dataDir := t.TempDir()
+	agDir := t.TempDir()
+	wsDir := t.TempDir()
+	patchDir := filepath.Join(dataDir, "patches")
+	_ = os.MkdirAll(patchDir, 0o755)
+
+	hash, _ := security.HashPassword("supersecret123")
+	cfg := &config.Config{
+		Port:            8443,
+		Workspace:       wsDir,
+		AntigravityDir:  agDir,
+		DataDir:         dataDir,
+		PasswordHash:    hash,
+		SessionSecret:   "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+		SessionTTLHours: 24,
+	}
+	sm, _ := security.NewSessionManager(cfg.SessionSecret, time.Hour, false)
+	audit, _ := security.NewAuditLogger(dataDir)
+	t.Cleanup(func() { _ = audit.Close() })
+	exp, _ := workspace.NewExplorer(wsDir)
+	_, lanNet, _ := net.ParseCIDR("192.168.1.0/24")
+
+	embeddedFS := fstest.MapFS{
+		"patches/mobile-hub.css": {Data: []byte("/* embedded css */")},
+		"patches/mobile-hub.js":  {Data: []byte("// embedded js")},
+	}
+
+	handler := NewRouter(Dependencies{
+		Config:        cfg,
+		Sessions:      sm,
+		RateLimiter:   security.NewAuthRateLimiter(5, time.Minute),
+		Audit:         audit,
+		Explorer:      exp,
+		PatchDir:      patchDir,
+		StrictSubnets: []*net.IPNet{lanNet},
+		StaticFS:      embeddedFS,
+	})
+
+	// 1. Preview requires auth
+	unauthPreview := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/preview/%d/", devPort), nil)
+	unauthPreview.RemoteAddr = "192.168.1.40:2222"
+	unauthRec := httptest.NewRecorder()
+	handler.ServeHTTP(unauthRec, unauthPreview)
+	if unauthRec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 on unauthenticated preview, got %d", unauthRec.Code)
+	}
+
+	// 2. Authenticate
+	loginReq := httptest.NewRequest(http.MethodPost, "/api/auth/login", strings.NewReader(`{"password":"supersecret123"}`))
+	loginReq.RemoteAddr = "192.168.1.40:2222"
+	loginRec := httptest.NewRecorder()
+	handler.ServeHTTP(loginRec, loginReq)
+	cookie := loginRec.Result().Cookies()[0]
+
+	// 3. Preview ports API
+	portsReq := httptest.NewRequest(http.MethodGet, "/api/preview/ports", nil)
+	portsReq.RemoteAddr = "192.168.1.40:2222"
+	portsReq.AddCookie(cookie)
+	portsRec := httptest.NewRecorder()
+	handler.ServeHTTP(portsRec, portsReq)
+	if portsRec.Code != http.StatusOK || !strings.Contains(portsRec.Body.String(), `"ports"`) {
+		t.Fatalf("expected ports JSON, got %d (%s)", portsRec.Code, portsRec.Body.String())
+	}
+
+	// 4. Authenticated preview rewrites HTML
+	prevReq := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/preview/%d/", devPort), nil)
+	prevReq.RemoteAddr = "192.168.1.40:2222"
+	prevReq.AddCookie(cookie)
+	prevRec := httptest.NewRecorder()
+	handler.ServeHTTP(prevRec, prevReq)
+	if prevRec.Code != http.StatusOK || !strings.Contains(prevRec.Body.String(), fmt.Sprintf(`/preview/%d/main.tsx`, devPort)) {
+		t.Fatalf("expected proxied & rewritten preview HTML, got %d body=%s", prevRec.Code, prevRec.Body.String())
+	}
+
+	// 5. Patch fallback -> embedded first
+	patchReq := httptest.NewRequest(http.MethodGet, "/patches/mobile-hub.css", nil)
+	patchReq.RemoteAddr = "192.168.1.40:2222"
+	patchRec := httptest.NewRecorder()
+	handler.ServeHTTP(patchRec, patchReq)
+	if patchRec.Code != http.StatusOK || patchRec.Header().Get("X-Gravlink-Patch-Source") != "embedded" {
+		t.Fatalf("expected embedded patch fallback, got status=%d src=%q", patchRec.Code, patchRec.Header().Get("X-Gravlink-Patch-Source"))
+	}
+
+	// 6. Hot-reload override on disk takes precedence immediately without restart
+	_ = os.WriteFile(filepath.Join(patchDir, "mobile-hub.css"), []byte("/* external hot reload */"), 0o644)
+	extRec := httptest.NewRecorder()
+	handler.ServeHTTP(extRec, patchReq)
+	if extRec.Code != http.StatusOK || extRec.Header().Get("X-Gravlink-Patch-Source") != "external" || !strings.Contains(extRec.Body.String(), "external hot reload") {
+		t.Fatalf("expected external hot-reload patch, got status=%d src=%q body=%s", extRec.Code, extRec.Header().Get("X-Gravlink-Patch-Source"), extRec.Body.String())
+	}
+
+	// 7. Arbitrary patch path rejected with 404
+	badPatchReq := httptest.NewRequest(http.MethodGet, "/patches/evil.txt", nil)
+	badPatchReq.RemoteAddr = "192.168.1.40:2222"
+	badPatchRec := httptest.NewRecorder()
+	handler.ServeHTTP(badPatchRec, badPatchReq)
+	if badPatchRec.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 for unknown patch asset, got %d", badPatchRec.Code)
 	}
 }

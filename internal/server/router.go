@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -18,6 +19,7 @@ import (
 
 	"gravlink/internal/agy"
 	"gravlink/internal/config"
+	"gravlink/internal/proxy"
 	"gravlink/internal/security"
 	"gravlink/internal/workspace"
 )
@@ -31,6 +33,8 @@ type Dependencies struct {
 	Explorer      *workspace.Explorer
 	Dispatcher    *agy.Dispatcher
 	HubProxy      http.Handler
+	PreviewProxy  http.Handler
+	PatchDir      string
 	StrictSubnets []*net.IPNet
 	CACertPEM     []byte
 	StaticFS      fs.FS
@@ -44,8 +48,16 @@ type wsEvent struct {
 
 // NewRouter builds the full LAN-secured HTTP/WebSocket handler.
 func NewRouter(deps Dependencies) http.Handler {
-	if deps.Dispatcher == nil && deps.Config != nil {
-		deps.Dispatcher = agy.NewDispatcher(deps.Config.AntigravityDir)
+	if deps.Config != nil {
+		if deps.Dispatcher == nil {
+			deps.Dispatcher = agy.NewDispatcher(deps.Config.AntigravityDir)
+		}
+		if deps.PreviewProxy == nil {
+			deps.PreviewProxy = proxy.NewPreviewProxyHandler(deps.Config.Port)
+		}
+		if deps.PatchDir == "" && deps.Config.DataDir != "" {
+			deps.PatchDir = filepath.Join(deps.Config.DataDir, "patches")
+		}
 	}
 	mux := http.NewServeMux()
 
@@ -96,9 +108,15 @@ func NewRouter(deps Dependencies) http.Handler {
 	mux.HandleFunc("GET /api/ws/conversations/{id}", handleConversationWS(deps))
 	mux.HandleFunc("GET /api/workspace/tree", deps.Sessions.RequireAuth(deps.Audit, handleWorkspaceTree(deps)))
 	mux.HandleFunc("GET /api/workspace/file", deps.Sessions.RequireAuth(deps.Audit, handleWorkspaceFile(deps)))
-	mux.HandleFunc("/hub/", handleHubProxy(deps))
+	mux.HandleFunc("GET /api/preview/ports", deps.Sessions.RequireAuth(deps.Audit, handlePreviewPorts(deps)))
+	mux.HandleFunc("GET /patches/{name}", handlePatchAsset(deps))
+	mux.HandleFunc("/hub/", requireSessionProxy(deps, deps.HubProxy, "Antigravity Hub proxy disabled"))
 	mux.HandleFunc("GET /hub", func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/hub/", http.StatusMovedPermanently)
+	})
+	mux.HandleFunc("/preview/{port}/", requireSessionProxy(deps, deps.PreviewProxy, "Dev preview proxy disabled"))
+	mux.HandleFunc("GET /preview/{port}", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/preview/"+r.PathValue("port")+"/", http.StatusMovedPermanently)
 	})
 
 	if deps.StaticFS != nil {
@@ -247,7 +265,7 @@ func handleDoctor(deps Dependencies) func(http.ResponseWriter, *http.Request, *s
 		if deps.Explorer != nil {
 			wsRoot = deps.Explorer.Root()
 		}
-		checks := agy.RunDoctor(r.Context(), deps.Config.AntigravityDir, wsRoot)
+		checks := agy.RunDoctorWithPatches(r.Context(), deps.Config.AntigravityDir, wsRoot, deps.PatchDir)
 		writeJSON(w, http.StatusOK, map[string]any{"checks": checks})
 	}
 }
@@ -451,7 +469,52 @@ func handleInteract(deps Dependencies) func(http.ResponseWriter, *http.Request, 
 	}
 }
 
-func handleHubProxy(deps Dependencies) http.HandlerFunc {
+func handlePreviewPorts(deps Dependencies) func(http.ResponseWriter, *http.Request, *security.SessionClaims) {
+	return func(w http.ResponseWriter, r *http.Request, _ *security.SessionClaims) {
+		selfPort := 0
+		if deps.Config != nil {
+			selfPort = deps.Config.Port
+		}
+		ports := proxy.ScanLocalDevPorts(r.Context(), selfPort)
+		writeJSON(w, http.StatusOK, map[string]any{"ports": ports})
+	}
+}
+
+func handlePatchAsset(deps Dependencies) http.HandlerFunc {
+	allowed := map[string]string{
+		"mobile-hub.css": "text/css; charset=utf-8",
+		"mobile-hub.js":  "application/javascript; charset=utf-8",
+	}
+	return func(w http.ResponseWriter, r *http.Request) {
+		name := r.PathValue("name")
+		ct, ok := allowed[name]
+		if !ok {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", ct)
+		w.Header().Set("Cache-Control", "no-store")
+
+		if deps.PatchDir != "" {
+			extPath := filepath.Join(deps.PatchDir, name)
+			if raw, err := os.ReadFile(extPath); err == nil {
+				w.Header().Set("X-Gravlink-Patch-Source", "external")
+				_, _ = w.Write(raw)
+				return
+			}
+		}
+		if deps.StaticFS != nil {
+			if raw, err := fs.ReadFile(deps.StaticFS, path.Join("patches", name)); err == nil {
+				w.Header().Set("X-Gravlink-Patch-Source", "embedded")
+				_, _ = w.Write(raw)
+				return
+			}
+		}
+		http.NotFound(w, r)
+	}
+}
+
+func requireSessionProxy(deps Dependencies, target http.Handler, disabledMsg string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if !security.ValidateSameOrigin(r) {
 			if deps.Audit != nil {
@@ -471,11 +534,11 @@ func handleHubProxy(deps Dependencies) http.HandlerFunc {
 			http.Error(w, "Unauthorized", http.StatusUnauthorized)
 			return
 		}
-		if deps.HubProxy == nil {
-			http.Error(w, "Antigravity Hub proxy disabled", http.StatusServiceUnavailable)
+		if target == nil {
+			http.Error(w, disabledMsg, http.StatusServiceUnavailable)
 			return
 		}
-		deps.HubProxy.ServeHTTP(w, r)
+		target.ServeHTTP(w, r)
 	}
 }
 
