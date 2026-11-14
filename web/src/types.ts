@@ -34,6 +34,10 @@ export interface TranscriptStep {
   content?: string;
   thinking?: string;
   tool_calls?: ToolCall[];
+  input_tokens?: number;
+  cache_read_tokens?: number;
+  output_tokens?: number;
+  error?: string;
 }
 
 export interface TreeNode {
@@ -90,6 +94,30 @@ export interface DevServerPort {
   port: number;
   label: string;
   active: boolean;
+}
+
+export interface SessionTokenUsage {
+  id: string;
+  title: string;
+  last_status: string;
+  last_step_at: string;
+  step_count: number;
+  turns: number;
+  input_tokens: number;
+  cache_read_tokens: number;
+  output_tokens: number;
+  total_tokens: number;
+  duration_ms: number;
+}
+
+export interface TokenUsageReport {
+  total_input_tokens: number;
+  total_cache_read_tokens: number;
+  total_output_tokens: number;
+  total_tokens: number;
+  total_turns: number;
+  total_duration_ms: number;
+  sessions: SessionTokenUsage[];
 }
 
 export interface SystemStatus {

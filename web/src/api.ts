@@ -8,6 +8,7 @@ import type {
   PendingResponse,
   PromptResponse,
   SystemStatus,
+  TokenUsageReport,
   TranscriptStep,
   TreeNode,
 } from './types';
@@ -64,8 +65,10 @@ export const api = {
   status: () => request<SystemStatus>('/api/status'),
   doctor: () => request<{ checks: DoctorCheck[] }>('/api/doctor'),
   conversations: () => request<{ conversations: ConversationSummary[] }>('/api/conversations'),
-  steps: (convId: string) =>
-    request<{ steps: TranscriptStep[] }>(`/api/conversations/${encodeURIComponent(convId)}/steps`),
+  steps: (convId: string, from = 0) =>
+    request<{ steps: TranscriptStep[] }>(
+      `/api/conversations/${encodeURIComponent(convId)}/steps${from > 0 ? `?from=${from}` : ''}`
+    ),
   tree: (relPath = '', depth = 4) =>
     request<{ root: string; nodes: TreeNode[] }>(
       `/api/workspace/tree?path=${encodeURIComponent(relPath)}&depth=${depth}`
@@ -106,4 +109,5 @@ export const api = {
       12000
     ),
   previewPorts: () => request<{ ports: DevServerPort[] }>('/api/preview/ports'),
+  tokenUsage: () => request<TokenUsageReport>('/api/tokens'),
 };
