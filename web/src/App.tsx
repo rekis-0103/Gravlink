@@ -15,6 +15,7 @@ import {
   RefreshCw,
   Sun,
   X,
+  Zap,
 } from 'lucide-react';
 import { api, setCSRFToken } from './api';
 import { AgentTimeline } from './components/AgentTimeline';
@@ -25,11 +26,13 @@ import { HubFrameView } from './components/HubFrameView';
 import { LoginView } from './components/LoginView';
 import { PreviewView } from './components/PreviewView';
 import { PromptComposer } from './components/PromptComposer';
+import { TokenUsageView } from './components/TokenUsageView';
 import { useAgentNotifications } from './hooks/useAgentNotifications';
 import { useAgentStream } from './hooks/useAgentStream';
+import { detectAgentRunning } from './lib/agentStatus';
 import type { ConversationSummary } from './types';
 
-type Tab = 'agent' | 'code' | 'preview' | 'hub' | 'status';
+type Tab = 'agent' | 'code' | 'preview' | 'hub' | 'tokens' | 'status';
 type ThemeMode = 'system' | 'light' | 'dark';
 
 function readStoredTheme(): ThemeMode {
@@ -143,15 +146,18 @@ export function App() {
     running: false,
   });
 
+  const activeConv = conversations.find((c) => c.id === activeConvId);
+  const { isRunning: isAgentRunning } = detectAgentRunning(steps, activeConv?.last_status);
+
   useEffect(() => {
-    const hasRunning = steps.some((s) => s.status && s.status !== 'DONE');
     const prev = prevRunningConvRef.current;
-    if (prev.convId === activeConvId && prev.running && !hasRunning && steps.length > 0) {
-      const label = conversations.find((c) => c.id === activeConvId)?.title || 'Antigravity';
+    if (prev.convId === activeConvId && prev.running && !isAgentRunning && steps.length > 0) {
+      const label = activeConv?.title || 'Antigravity';
       notify('Antigravity Ready', `${label} finished`, 'done');
+      void loadConversations(false);
     }
-    prevRunningConvRef.current = { convId: activeConvId, running: hasRunning };
-  }, [steps, activeConvId, conversations, notify]);
+    prevRunningConvRef.current = { convId: activeConvId, running: isAgentRunning };
+  }, [isAgentRunning, activeConvId, activeConv?.title, steps.length, notify]);
 
   if (!authChecked) {
     return (
@@ -173,7 +179,6 @@ export function App() {
     );
   }
 
-  const activeConv = conversations.find((c) => c.id === activeConvId);
   const isLive = streamState === 'live' || streamState === 'polling';
 
   const openDrawer = () => {
@@ -226,19 +231,24 @@ export function App() {
           <span>{themeLabel}</span>
         </button>
 
-        <div className="status-pill" aria-live="polite">
+        <div
+          className={`status-pill ${isAgentRunning ? 'ai-active' : ''}`}
+          aria-live="polite"
+        >
           <span
-            className={`dot ${isLive ? 'live' : streamState === 'error' ? 'danger' : 'warn'}`}
+            className={`dot ${isAgentRunning || isLive ? 'live' : streamState === 'error' ? 'danger' : 'warn'}`}
             aria-hidden="true"
           />
           <span>
-            {!activeConvId
-              ? 'READY'
-              : streamState === 'live'
-                ? 'LIVE'
-                : streamState === 'polling'
-                  ? 'SYNC'
-                  : streamState.toUpperCase()}
+            {isAgentRunning
+              ? 'AI RUN'
+              : !activeConvId
+                ? 'READY'
+                : streamState === 'live'
+                  ? 'LIVE'
+                  : streamState === 'polling'
+                    ? 'SYNC'
+                    : streamState.toUpperCase()}
           </span>
         </div>
       </header>
@@ -250,6 +260,8 @@ export function App() {
               steps={steps}
               streamState={streamState}
               conversationTitle={activeConv?.title || (activeConvId ? activeConvId : 'New Conversation')}
+              conversationStatus={activeConv?.last_status}
+              onOpenTokens={() => setTab('tokens')}
             />
             <ApprovalBanner
               conversationId={activeConvId || ''}
@@ -278,6 +290,16 @@ export function App() {
         {tab === 'code' && <CodeExplorer />}
         {tab === 'preview' && <PreviewView />}
         {tab === 'hub' && <HubFrameView />}
+        {tab === 'tokens' && (
+          <TokenUsageView
+            activeConvId={activeConvId}
+            onSelectSession={(id) => {
+              setActiveConvId(id);
+              setTab('agent');
+            }}
+            onBackToChat={() => setTab('agent')}
+          />
+        )}
         {tab === 'status' && <DiagnosticsView />}
       </main>
 
@@ -364,6 +386,25 @@ export function App() {
           </div>
 
           <div className="Drawer-list">
+            <button
+              type="button"
+              className={`drawer-nav-btn ${tab === 'tokens' ? 'active' : ''}`}
+              onClick={() => {
+                setTab('tokens');
+                closeDrawer();
+              }}
+            >
+              <Zap size={16} aria-hidden="true" style={{ color: 'var(--tool-cmd)' }} />
+              <div style={{ flex: 1, textAlign: 'left' }}>
+                <div style={{ fontWeight: 600, fontSize: '0.88rem' }}>Penggunaan Token</div>
+                <div style={{ fontSize: '0.72rem', color: 'var(--muted)' }}>
+                  Input, cache &amp; output AI per sesi
+                </div>
+              </div>
+            </button>
+
+            <div className="drawer-section-label">Riwayat Sesi Antigravity</div>
+
             {conversations.length === 0 ? (
               <p style={{ color: 'var(--muted)', fontSize: '0.85rem', padding: '0.5rem' }}>
                 No Antigravity conversations found yet.
