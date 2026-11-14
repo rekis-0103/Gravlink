@@ -27,7 +27,7 @@ import (
 	"gravlink/web"
 )
 
-const version = "0.2.0-m2"
+const version = "0.4.0-m4"
 
 func main() {
 	if len(os.Args) < 2 {
@@ -149,6 +149,9 @@ func runStart(args []string) {
 	staticFS, err := web.DistFS()
 	must(err)
 
+	patchDir := filepath.Join(cfg.DataDir, "patches")
+	_ = os.MkdirAll(patchDir, 0o700)
+
 	handler := server.NewRouter(server.Dependencies{
 		Config:        cfg,
 		Sessions:      sm,
@@ -157,6 +160,8 @@ func runStart(args []string) {
 		Explorer:      exp,
 		Dispatcher:    agy.NewDispatcher(cfg.AntigravityDir),
 		HubProxy:      proxy.NewHubProxyHandler(cfg.AntigravityDir),
+		PreviewProxy:  proxy.NewPreviewProxyHandler(cfg.Port),
+		PatchDir:      patchDir,
 		StrictSubnets: strictSubnets,
 		CACertPEM:     caPEM,
 		StaticFS:      staticFS,
@@ -178,6 +183,16 @@ func runStart(args []string) {
 	fmt.Printf("\nGravlink %s listening on %s://0.0.0.0:%d (LAN ONLY)\n", version, scheme, cfg.Port)
 	fmt.Printf("Workspace (read-only): %s\n", exp.Root())
 	fmt.Printf("Audit log: %s\n", filepath.Join(cfg.DataDir, "audit.log"))
+	fmt.Printf("Hot-reload patches dir: %s\n", patchDir)
+
+	// Automatic startup contract smoke check (Milestone 4)
+	checkCtx, checkCancel := context.WithTimeout(context.Background(), 3*time.Second)
+	for _, c := range agy.RunDoctorWithPatches(checkCtx, cfg.AntigravityDir, exp.Root(), patchDir) {
+		if c.Status != "PASS" {
+			fmt.Printf("[Contract %s] %s: %s\n", c.Status, c.Name, c.Detail)
+		}
+	}
+	checkCancel()
 
 	fwOK, fwDetail := security.CheckPrivateFirewallStatus()
 	if !fwOK {
