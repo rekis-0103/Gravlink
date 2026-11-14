@@ -6,8 +6,11 @@ import {
   LogOut,
   Menu,
   MessageSquare,
+  Monitor,
+  Moon,
   Plus,
   RefreshCw,
+  Sun,
   X,
 } from 'lucide-react';
 import { api, setCSRFToken } from './api';
@@ -22,16 +25,64 @@ import { useAgentStream } from './hooks/useAgentStream';
 import type { ConversationSummary } from './types';
 
 type Tab = 'agent' | 'code' | 'hub' | 'status';
+type ThemeMode = 'system' | 'light' | 'dark';
+
+function readStoredTheme(): ThemeMode {
+  try {
+    const val = localStorage.getItem('gravlink_theme');
+    if (val === 'light' || val === 'dark' || val === 'system') return val;
+  } catch {
+    // ignore storage restriction
+  }
+  return 'system';
+}
+
+function applyTheme(mode: ThemeMode) {
+  const root = document.documentElement;
+  if (mode === 'system') {
+    delete root.dataset.theme;
+  } else {
+    root.dataset.theme = mode;
+  }
+  const metaColor =
+    mode === 'light'
+      ? '#f8fafc'
+      : mode === 'dark'
+        ? '#0f172a'
+        : window.matchMedia?.('(prefers-color-scheme: dark)').matches
+          ? '#0f172a'
+          : '#f8fafc';
+  document
+    .querySelectorAll('meta[name="theme-color"]')
+    .forEach((m) => m.setAttribute('content', metaColor));
+  try {
+    localStorage.setItem('gravlink_theme', mode);
+  } catch {
+    // ignore
+  }
+}
 
 export function App() {
   const [authChecked, setAuthChecked] = useState(false);
   const [authenticated, setAuthenticated] = useState(false);
   const [tlsEnabled, setTlsEnabled] = useState(true);
   const [tab, setTab] = useState<Tab>('agent');
+  const [theme, setTheme] = useState<ThemeMode>(readStoredTheme);
   const [conversations, setConversations] = useState<ConversationSummary[]>([]);
   const [activeConvId, setActiveConvId] = useState<string | null>(null);
   const initializedRef = useRef(false);
   const drawerRef = useRef<HTMLDialogElement>(null);
+
+  useEffect(() => {
+    applyTheme(theme);
+  }, [theme]);
+
+  const cycleTheme = () => {
+    setTheme((curr) => (curr === 'system' ? 'light' : curr === 'light' ? 'dark' : 'system'));
+  };
+
+  const ThemeIcon = theme === 'light' ? Sun : theme === 'dark' ? Moon : Monitor;
+  const themeLabel = theme === 'light' ? 'Light' : theme === 'dark' ? 'Dark' : 'Auto';
 
   const loadConversations = async (autoPickFirst = false) => {
     try {
@@ -143,6 +194,17 @@ export function App() {
             <span className="session-sub">Send a prompt to start on laptop</span>
           )}
         </div>
+
+        <button
+          type="button"
+          className="theme-cycle-btn"
+          onClick={cycleTheme}
+          aria-label={`Theme: ${themeLabel}. Tap to switch`}
+          title={`Switch theme (current: ${themeLabel})`}
+        >
+          <ThemeIcon size={15} aria-hidden="true" />
+          <span>{themeLabel}</span>
+        </button>
 
         <div className="status-pill" aria-live="polite">
           <span
@@ -291,7 +353,36 @@ export function App() {
             )}
           </div>
 
-          <div style={{ padding: '0.75rem', borderTop: '1px solid var(--border)' }}>
+          <div style={{ padding: '0.75rem', borderTop: '1px solid var(--border)', display: 'flex', flexDirection: 'column', gap: '0.6rem' }}>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.35rem' }}>
+              <span style={{ fontSize: '0.75rem', fontWeight: 600, color: 'var(--muted)' }}>
+                Appearance
+              </span>
+              <div className="theme-segmented" role="group" aria-label="Theme mode">
+                <button
+                  type="button"
+                  className={theme === 'system' ? 'active' : ''}
+                  onClick={() => setTheme('system')}
+                >
+                  <Monitor size={14} aria-hidden="true" /> Auto
+                </button>
+                <button
+                  type="button"
+                  className={theme === 'light' ? 'active' : ''}
+                  onClick={() => setTheme('light')}
+                >
+                  <Sun size={14} aria-hidden="true" /> Light
+                </button>
+                <button
+                  type="button"
+                  className={theme === 'dark' ? 'active' : ''}
+                  onClick={() => setTheme('dark')}
+                >
+                  <Moon size={14} aria-hidden="true" /> Dark
+                </button>
+              </div>
+            </div>
+
             <button type="button" style={{ width: '100%' }} onClick={handleLogout}>
               <LogOut size={16} aria-hidden="true" />
               Sign Out
