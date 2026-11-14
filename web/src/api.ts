@@ -3,6 +3,9 @@ import type {
   ConversationSummary,
   DoctorCheck,
   FileContent,
+  ModelOption,
+  PendingResponse,
+  PromptResponse,
   SystemStatus,
   TranscriptStep,
   TreeNode,
@@ -14,7 +17,7 @@ export function setCSRFToken(token: string) {
   csrfToken = token;
 }
 
-async function request<T>(url: string, init: RequestInit = {}): Promise<T> {
+async function request<T>(url: string, init: RequestInit = {}, timeoutMs = 10000): Promise<T> {
   const headers = new Headers(init.headers);
   if (init.method && init.method !== 'GET' && init.method !== 'HEAD') {
     headers.set('Content-Type', 'application/json');
@@ -24,7 +27,7 @@ async function request<T>(url: string, init: RequestInit = {}): Promise<T> {
   }
 
   const controller = new AbortController();
-  const timeout = window.setTimeout(() => controller.abort(), 10000);
+  const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
 
   try {
     const res = await fetch(url, {
@@ -68,4 +71,37 @@ export const api = {
     ),
   file: (relPath: string) =>
     request<FileContent>(`/api/workspace/file?path=${encodeURIComponent(relPath)}`),
+  models: () => request<{ models: ModelOption[] }>('/api/models'),
+  sendPrompt: (
+    convId: string | 'new',
+    payload: { prompt: string; mode?: string; model?: string }
+  ) =>
+    request<PromptResponse>(
+      `/api/conversations/${encodeURIComponent(convId || 'new')}/prompt`,
+      {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      },
+      30000
+    ),
+  pending: (convId: string) =>
+    request<PendingResponse>(`/api/conversations/${encodeURIComponent(convId)}/pending`),
+  interact: (
+    convId: string,
+    payload: {
+      trajectory_id: string;
+      step_index: number;
+      kind: string;
+      allow: boolean;
+      command_line?: string;
+    }
+  ) =>
+    request<{ ok: boolean }>(
+      `/api/conversations/${encodeURIComponent(convId)}/interact`,
+      {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      },
+      12000
+    ),
 };

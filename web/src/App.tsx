@@ -1,14 +1,27 @@
 import { useEffect, useRef, useState } from 'react';
-import { Activity, Code2, LogOut, Menu, MessageSquare, RefreshCw, X } from 'lucide-react';
+import {
+  Activity,
+  Code2,
+  Globe,
+  LogOut,
+  Menu,
+  MessageSquare,
+  Plus,
+  RefreshCw,
+  X,
+} from 'lucide-react';
 import { api, setCSRFToken } from './api';
 import { AgentTimeline } from './components/AgentTimeline';
+import { ApprovalBanner } from './components/ApprovalBanner';
 import { CodeExplorer } from './components/CodeExplorer';
 import { DiagnosticsView } from './components/DiagnosticsView';
+import { HubFrameView } from './components/HubFrameView';
 import { LoginView } from './components/LoginView';
+import { PromptComposer } from './components/PromptComposer';
 import { useAgentStream } from './hooks/useAgentStream';
 import type { ConversationSummary } from './types';
 
-type Tab = 'agent' | 'code' | 'status';
+type Tab = 'agent' | 'code' | 'hub' | 'status';
 
 export function App() {
   const [authChecked, setAuthChecked] = useState(false);
@@ -17,15 +30,16 @@ export function App() {
   const [tab, setTab] = useState<Tab>('agent');
   const [conversations, setConversations] = useState<ConversationSummary[]>([]);
   const [activeConvId, setActiveConvId] = useState<string | null>(null);
+  const initializedRef = useRef(false);
   const drawerRef = useRef<HTMLDialogElement>(null);
 
-  const loadConversations = async () => {
+  const loadConversations = async (autoPickFirst = false) => {
     try {
       const res = await api.conversations();
       const list = res.conversations ?? [];
       setConversations(list);
-      if (list.length > 0 && (!activeConvId || !list.some((c) => c.id === activeConvId))) {
-        setActiveConvId(list[0].id);
+      if (autoPickFirst && list.length > 0) {
+        setActiveConvId((curr) => curr ?? list[0].id);
       }
     } catch {
       // Handled gracefully in UI
@@ -60,8 +74,9 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    if (authenticated) {
-      void loadConversations();
+    if (authenticated && !initializedRef.current) {
+      initializedRef.current = true;
+      void loadConversations(true);
     }
   }, [authenticated]);
 
@@ -76,14 +91,22 @@ export function App() {
   }
 
   if (!authenticated) {
-    return <LoginView tlsEnabled={tlsEnabled} onSuccess={() => setAuthenticated(true)} />;
+    return (
+      <LoginView
+        tlsEnabled={tlsEnabled}
+        onSuccess={() => {
+          initializedRef.current = false;
+          setAuthenticated(true);
+        }}
+      />
+    );
   }
 
   const activeConv = conversations.find((c) => c.id === activeConvId);
   const isLive = streamState === 'live' || streamState === 'polling';
 
   const openDrawer = () => {
-    void loadConversations();
+    void loadConversations(false);
     drawerRef.current?.showModal();
   };
 
@@ -95,6 +118,7 @@ export function App() {
     try {
       await api.logout();
     } finally {
+      initializedRef.current = false;
       setAuthenticated(false);
       setCSRFToken('');
     }
@@ -108,11 +132,15 @@ export function App() {
         </button>
 
         <div className="top-bar-title">
-          <span className="session-label">{activeConv?.title || 'Gravlink'}</span>
-          {activeConv && (
+          <span className="session-label">
+            {activeConv?.title || (activeConvId ? activeConvId : 'New Conversation')}
+          </span>
+          {activeConv ? (
             <span className="session-sub">
               {activeConv.step_count} steps · {activeConv.last_status}
             </span>
+          ) : (
+            <span className="session-sub">Send a prompt to start on laptop</span>
           )}
         </div>
 
@@ -121,19 +149,45 @@ export function App() {
             className={`dot ${isLive ? 'live' : streamState === 'error' ? 'danger' : 'warn'}`}
             aria-hidden="true"
           />
-          <span>{streamState === 'live' ? 'LIVE' : streamState === 'polling' ? 'SYNC' : streamState.toUpperCase()}</span>
+          <span>
+            {!activeConvId
+              ? 'READY'
+              : streamState === 'live'
+                ? 'LIVE'
+                : streamState === 'polling'
+                  ? 'SYNC'
+                  : streamState.toUpperCase()}
+          </span>
         </div>
       </header>
 
       <main className="main-area">
         {tab === 'agent' && (
-          <AgentTimeline
-            steps={steps}
-            streamState={streamState}
-            conversationTitle={activeConv?.title || 'No session selected'}
-          />
+          <>
+            <AgentTimeline
+              steps={steps}
+              streamState={streamState}
+              conversationTitle={activeConv?.title || (activeConvId ? activeConvId : 'New Conversation')}
+            />
+            <ApprovalBanner
+              conversationId={activeConvId || ''}
+              onResolved={() => void loadConversations(false)}
+              onOpenHub={() => setTab('hub')}
+            />
+            <PromptComposer
+              conversationId={activeConvId || ''}
+              onSent={(targetConvId) => {
+                if (targetConvId && targetConvId !== activeConvId) {
+                  setActiveConvId(targetConvId);
+                }
+                window.setTimeout(() => void loadConversations(false), 700);
+              }}
+              onNewChat={() => setActiveConvId(null)}
+            />
+          </>
         )}
         {tab === 'code' && <CodeExplorer />}
+        {tab === 'hub' && <HubFrameView />}
         {tab === 'status' && <DiagnosticsView />}
       </main>
 
@@ -143,23 +197,31 @@ export function App() {
           className={tab === 'agent' ? 'active' : ''}
           onClick={() => setTab('agent')}
         >
-          <MessageSquare size={20} aria-hidden="true" />
-          <span>Agent</span>
+          <MessageSquare size={19} aria-hidden="true" />
+          <span>Chat</span>
         </button>
         <button
           type="button"
           className={tab === 'code' ? 'active' : ''}
           onClick={() => setTab('code')}
         >
-          <Code2 size={20} aria-hidden="true" />
+          <Code2 size={19} aria-hidden="true" />
           <span>Code</span>
+        </button>
+        <button
+          type="button"
+          className={tab === 'hub' ? 'active' : ''}
+          onClick={() => setTab('hub')}
+        >
+          <Globe size={19} aria-hidden="true" />
+          <span>Hub</span>
         </button>
         <button
           type="button"
           className={tab === 'status' ? 'active' : ''}
           onClick={() => setTab('status')}
         >
-          <Activity size={20} aria-hidden="true" />
+          <Activity size={19} aria-hidden="true" />
           <span>Doctor</span>
         </button>
       </nav>
@@ -176,7 +238,25 @@ export function App() {
           <div className="Drawer-header">
             <strong style={{ fontSize: '0.95rem' }}>Antigravity Sessions</strong>
             <div style={{ display: 'flex', gap: '0.3rem' }}>
-              <button type="button" className="ghost" onClick={() => void loadConversations()} aria-label="Refresh sessions">
+              <button
+                type="button"
+                className="ghost"
+                onClick={() => {
+                  setActiveConvId(null);
+                  setTab('agent');
+                  closeDrawer();
+                }}
+                aria-label="Start new conversation"
+                title="New Chat"
+              >
+                <Plus size={18} aria-hidden="true" />
+              </button>
+              <button
+                type="button"
+                className="ghost"
+                onClick={() => void loadConversations(false)}
+                aria-label="Refresh sessions"
+              >
                 <RefreshCw size={17} aria-hidden="true" />
               </button>
               <button type="button" className="ghost" onClick={closeDrawer} aria-label="Close sessions menu">

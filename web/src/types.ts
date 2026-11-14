@@ -59,6 +59,33 @@ export interface DoctorCheck {
   detail: string;
 }
 
+export interface ModelOption {
+  id: string;
+  label: string;
+}
+
+export interface PendingInteraction {
+  cascade_id: string;
+  trajectory_id: string;
+  step_index: number;
+  kind: 'runCommand' | 'permission' | 'confirm' | 'unknown';
+  tool_name?: string;
+  command_line?: string;
+  resource?: string;
+  prompt?: string;
+}
+
+export interface PromptResponse {
+  conversation_id: string;
+  backend: string;
+}
+
+export interface PendingResponse {
+  pending: PendingInteraction[];
+  status: string;
+  error?: string;
+}
+
 export interface SystemStatus {
   workspace: string;
   hubs: HubInfo[];

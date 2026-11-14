@@ -1,6 +1,6 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { MouseEvent, useEffect, useMemo, useRef, useState } from 'react';
 import DOMPurify from 'dompurify';
-import { marked } from 'marked';
+import { marked, type Tokens } from 'marked';
 import { ArrowDown, Brain, ChevronRight, Wrench } from 'lucide-react';
 import type { TranscriptStep } from '../types';
 import type { StreamState } from '../hooks/useAgentStream';
@@ -11,9 +11,23 @@ interface AgentTimelineProps {
   conversationTitle: string;
 }
 
-marked.setOptions({
+function escapeHtml(str: string): string {
+  return str
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+marked.use({
   breaks: true,
   gfm: true,
+  renderer: {
+    code({ text, lang }: Tokens.Code) {
+      const safeLang = escapeHtml((lang || 'code').trim().split(/\s+/)[0] || 'code');
+      return `<div class="code-block-wrap"><div class="code-block-bar"><span>${safeLang}</span><button type="button" class="code-copy-btn">Copy</button></div><pre><code>${escapeHtml(text)}</code></pre></div>`;
+    },
+  },
 });
 
 function formatStepText(step: TranscriptStep): string {
@@ -28,7 +42,7 @@ function formatStepText(step: TranscriptStep): string {
 function renderSafeMarkdown(text: string): string {
   if (!text) return '';
   const html = marked.parse(text, { async: false }) as string;
-  return DOMPurify.sanitize(html);
+  return DOMPurify.sanitize(html, { ADD_TAGS: ['button'], ADD_ATTR: ['type', 'class'] });
 }
 
 function formatArgs(args: unknown): string {
@@ -77,8 +91,22 @@ export function AgentTimeline({ steps, streamState, conversationTitle }: AgentTi
     setPinnedToBottom(true);
   };
 
+  const handleTimelineClick = (ev: MouseEvent<HTMLDivElement>) => {
+    const target = ev.target as HTMLElement | null;
+    const btn = target?.closest('.code-copy-btn') as HTMLButtonElement | null;
+    if (!btn) return;
+    const codeText = btn.closest('.code-block-wrap')?.querySelector('pre')?.textContent ?? '';
+    if (!codeText) return;
+    void navigator.clipboard?.writeText(codeText).then(() => {
+      btn.textContent = 'Copied ✓';
+      window.setTimeout(() => {
+        btn.textContent = 'Copy';
+      }, 1500);
+    });
+  };
+
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minBlockSize: 0, position: 'relative' }}>
+    <div className="chat-feed-wrap">
       <div className="timeline-toolbar">
         <span style={{ color: 'var(--muted)' }}>
           {visibleSteps.length} {visibleSteps.length === 1 ? 'step' : 'steps'}
@@ -103,15 +131,16 @@ export function AgentTimeline({ steps, streamState, conversationTitle }: AgentTi
 
       <div className="scroll-area" ref={scrollRef} onScroll={handleScroll}>
         {visibleSteps.length === 0 ? (
-          <div className="diag-card" style={{ textAlign: 'center', color: 'var(--muted)' }}>
-            <p>
+          <div className="chat-empty-state">
+            <strong>{conversationTitle}</strong>
+            <span>
               {streamState === 'connecting'
                 ? 'Connecting to live transcript stream...'
-                : `No visible steps yet for "${conversationTitle}".`}
-            </p>
+                : 'Send a prompt below or pick an active session from the menu.'}
+            </span>
           </div>
         ) : (
-          <div className="timeline-list">
+          <div className="timeline-list" onClick={handleTimelineClick}>
             {visibleSteps.map((step) => {
               const isUser = step.type === 'USER_INPUT';
               const isRunning = step.status !== 'DONE';
@@ -121,19 +150,31 @@ export function AgentTimeline({ steps, streamState, conversationTitle }: AgentTi
                 ? new Date(step.created_at).toLocaleTimeString([], {
                     hour: '2-digit',
                     minute: '2-digit',
-                    second: '2-digit',
                   })
                 : '';
+
+              if (isUser) {
+                return (
+                  <article key={step.step_index} className="msg-user-row">
+                    <div className="msg-user-bubble">
+                      {bodyText && (
+                        <div className="markdown-body" dangerouslySetInnerHTML={{ __html: safeHtml }} />
+                      )}
+                    </div>
+                    {timeLabel && <span className="msg-timestamp">You · {timeLabel}</span>}
+                  </article>
+                );
+              }
 
               return (
                 <article
                   key={step.step_index}
-                  className={`step-card ${isUser ? 'user' : ''} ${isRunning ? 'running' : ''}`}
+                  className={`msg-assistant ${isRunning ? 'running' : ''}`}
                 >
-                  <div className="step-meta">
+                  <div className="msg-assistant-header">
                     <span className="step-badge">
                       {isRunning && <span className="dot warn" aria-hidden="true" />}
-                      {isUser ? 'You' : step.type === 'PLANNER_RESPONSE' ? 'Antigravity' : step.type}
+                      {step.type === 'PLANNER_RESPONSE' ? 'Antigravity' : step.type}
                     </span>
                     <span>
                       {isRunning ? `${step.status} · ` : ''}
@@ -144,13 +185,13 @@ export function AgentTimeline({ steps, streamState, conversationTitle }: AgentTi
                   {step.thinking && (
                     <details className="thinking-box">
                       <summary>
-                        <ChevronRight size={14} aria-hidden="true" style={{ marginRight: '0.25rem' }} />
-                        <Brain size={14} aria-hidden="true" style={{ marginRight: '0.35rem' }} />
-                        Thinking process
+                        <ChevronRight size={14} aria-hidden="true" />
+                        <Brain size={14} aria-hidden="true" />
+                        <span>Thinking process</span>
                       </summary>
                       <div
                         className="markdown-body"
-                        style={{ marginTop: '0.5rem', color: 'var(--muted)' }}
+                        style={{ marginTop: '0.45rem', color: 'var(--muted)' }}
                         dangerouslySetInnerHTML={{ __html: renderSafeMarkdown(step.thinking) }}
                       />
                     </details>
@@ -167,7 +208,7 @@ export function AgentTimeline({ steps, streamState, conversationTitle }: AgentTi
                         return (
                           <details key={`${step.step_index}-tc-${idx}`} className="tool-details">
                             <summary>
-                              <Wrench size={12} aria-hidden="true" style={{ color: 'var(--accent)' }} />
+                              <Wrench size={12} aria-hidden="true" style={{ color: 'var(--accent)', flexShrink: 0 }} />
                               <span>{tc.name}</span>
                             </summary>
                             {argsText && <pre className="tool-args-pre">{argsText}</pre>}
@@ -194,11 +235,6 @@ export function AgentTimeline({ steps, streamState, conversationTitle }: AgentTi
           Latest
         </button>
       )}
-
-      <div className="mvp-notice">
-        <span>Read-Only Live View · {streamState === 'polling' ? 'HTTPS Poll' : streamState.toUpperCase()}</span>
-        <span>Prompt &amp; Approval: M2</span>
-      </div>
     </div>
   );
 }
