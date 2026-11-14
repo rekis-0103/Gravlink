@@ -1,0 +1,20 @@
+/* Gravlink mobile touch & safe-area adaptations for Antigravity Jetski Hub UI */
+html, body, #root {
+  width: 100% !important;
+  max-width: 100dvw !important;
+  height: 100dvh !important;
+  overflow-x: hidden !important;
+  padding-bottom: env(safe-area-inset-bottom, 0px) !important;
+}
+
+@media (pointer: coarse) {
+  button, [role="button"], select, a {
+    min-height: 44px;
+    min-width: 44px;
+    touch-action: manipulation;
+  }
+
+  input, textarea, [contenteditable="true"] {
+    font-size: max(1rem, 16px) !important;
+  }
+}
