@@ -87,17 +87,6 @@ func probeHealth(ctx context.Context, client *http.Client, port int) bool {
 	return resp.StatusCode >= 200 && resp.StatusCode < 500
 }
 
-func isProcessAlive(pid int) bool {
-	if pid <= 0 {
-		return false
-	}
-	proc, err := os.FindProcess(pid)
-	if err != nil || proc == nil {
-		return false
-	}
-	return true
-}
-
 // FindAgyBinary attempts to locate agy.exe / agy on the system.
 func FindAgyBinary() string {
 	home, err := os.UserHomeDir()
