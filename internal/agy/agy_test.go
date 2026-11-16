@@ -88,3 +88,15 @@ func TestDiscoverHubs(t *testing.T) {
 		t.Fatalf("unexpected version: %s", hubs[0].LSVersion)
 	}
 }
+
+func TestIsProcessAlive(t *testing.T) {
+	if !isProcessAlive(os.Getpid()) {
+		t.Fatalf("expected current PID %d to be alive", os.Getpid())
+	}
+	if isProcessAlive(0) || isProcessAlive(-5) {
+		t.Fatalf("expected non-positive PID to be dead")
+	}
+	if isProcessAlive(99999999) {
+		t.Fatalf("expected non-existent PID 99999999 to be dead")
+	}
+}
