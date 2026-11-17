@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os/exec"
 	"strconv"
@@ -42,6 +43,29 @@ type ModelOption struct {
 	Label string `json:"label"`
 }
 
+type modelCatalogEntry struct {
+	ID           string
+	Label        string
+	ModelOrAlias map[string]string
+}
+
+type limitedBuffer struct {
+	buf bytes.Buffer
+	max int
+}
+
+func (l *limitedBuffer) Write(p []byte) (int, error) {
+	if l.max > 0 && l.buf.Len() < l.max {
+		remain := l.max - l.buf.Len()
+		if len(p) > remain {
+			_, _ = l.buf.Write(p[:remain])
+		} else {
+			_, _ = l.buf.Write(p)
+		}
+	}
+	return len(p), nil
+}
+
 // PromptRequest configures a prompt dispatched from mobile to Antigravity.
 type PromptRequest struct {
 	ConversationID string `json:"conversation_id"`
@@ -65,9 +89,13 @@ type Dispatcher struct {
 	antigravityDir string
 	httpClient     *http.Client
 
-	modelsMu    sync.Mutex
-	cachedAt    time.Time
-	cachedModel []ModelOption
+	modelsMu      sync.Mutex
+	cachedAt      time.Time
+	cachedModel   []ModelOption
+	cachedCatalog []modelCatalogEntry
+
+	errLogMu sync.RWMutex
+	errLogFn func(event, detail string)
 }
 
 // NewDispatcher creates a Dispatcher bound to antigravityDir.
@@ -75,6 +103,23 @@ func NewDispatcher(antigravityDir string) *Dispatcher {
 	return &Dispatcher{
 		antigravityDir: antigravityDir,
 		httpClient:     &http.Client{Timeout: 10 * time.Second},
+	}
+}
+
+// SetErrorLogger registers a callback to record asynchronous dispatch failures.
+func (d *Dispatcher) SetErrorLogger(fn func(event, detail string)) {
+	d.errLogMu.Lock()
+	d.errLogFn = fn
+	d.errLogMu.Unlock()
+}
+
+func (d *Dispatcher) logAsyncError(event, detail string) {
+	log.Printf("[gravlink/agy] %s: %s", event, detail)
+	d.errLogMu.RLock()
+	fn := d.errLogFn
+	d.errLogMu.RUnlock()
+	if fn != nil {
+		fn(event, detail)
 	}
 }
 
@@ -238,8 +283,13 @@ func (d *Dispatcher) SendPrompt(ctx context.Context, req PromptRequest) (string,
 					{"text": prompt},
 				},
 			}
+			if cascadeCfg := d.buildCascadeConfig(ctx, hub, req); cascadeCfg != nil {
+				rpcPayload["cascadeConfig"] = cascadeCfg
+			}
 			if err := d.callHubRPC(ctx, hub, "SendUserCascadeMessage", rpcPayload, nil); err == nil {
 				return convID, "hub_rpc", nil
+			} else {
+				d.logAsyncError("hub_rpc_send_failed", fmt.Sprintf("conv=%s err=%v", convID, err))
 			}
 		}
 	}
@@ -268,14 +318,160 @@ func (d *Dispatcher) SendPrompt(ctx context.Context, req PromptRequest) (string,
 	if req.Workspace != "" {
 		cmd.Dir = req.Workspace
 	}
+	stderrBuf := &limitedBuffer{max: 8192}
+	cmd.Stderr = stderrBuf
 	if err := cmd.Start(); err != nil {
 		return "", "", fmt.Errorf("failed starting agy CLI: %w", err)
 	}
-	go func() {
-		_ = cmd.Wait()
-	}()
+	go func(targetConv string) {
+		if waitErr := cmd.Wait(); waitErr != nil {
+			detail := fmt.Sprintf("conv=%s err=%v", targetConv, waitErr)
+			if errText := strings.TrimSpace(stderrBuf.buf.String()); errText != "" {
+				detail += " stderr=" + errText
+			}
+			d.logAsyncError("cli_fallback_failed", detail)
+		}
+	}(req.ConversationID)
 
 	return req.ConversationID, "agy_cli", nil
+}
+
+func (d *Dispatcher) buildCascadeConfig(ctx context.Context, hub HubInfo, req PromptRequest) map[string]any {
+	mode := strings.ToLower(strings.TrimSpace(req.Mode))
+	model := strings.TrimSpace(req.Model)
+	if mode == "" && model == "" {
+		return nil
+	}
+
+	plannerConfig := map[string]any{}
+	switch mode {
+	case "plan":
+		plannerConfig["conversational"] = map[string]any{
+			"plannerMode": "CONVERSATIONAL_PLANNER_MODE_READ_ONLY",
+		}
+	case "auto", "accept-edits":
+		plannerConfig["conversational"] = map[string]any{
+			"plannerMode": "CONVERSATIONAL_PLANNER_MODE_DEFAULT",
+			"agenticMode": true,
+		}
+	}
+
+	if model != "" {
+		if moa := d.resolveModelOrAlias(ctx, hub, model); len(moa) > 0 {
+			plannerConfig["requestedModel"] = moa
+		}
+	}
+
+	if len(plannerConfig) == 0 {
+		return nil
+	}
+	return map[string]any{
+		"plannerConfig": plannerConfig,
+	}
+}
+
+func (d *Dispatcher) resolveModelOrAlias(ctx context.Context, hub HubInfo, rawModel string) map[string]string {
+	model := strings.TrimSpace(rawModel)
+	if model == "" {
+		return nil
+	}
+	if strings.HasPrefix(model, "MODEL_ALIAS_") {
+		return map[string]string{"alias": model}
+	}
+	if strings.HasPrefix(model, "MODEL_") {
+		return map[string]string{"model": model}
+	}
+	if strings.EqualFold(model, "auto") {
+		return map[string]string{"alias": "MODEL_ALIAS_AUTO"}
+	}
+	if strings.EqualFold(model, "recommended") {
+		return map[string]string{"alias": "MODEL_ALIAS_RECOMMENDED"}
+	}
+
+	d.modelsMu.Lock()
+	catalog := append([]modelCatalogEntry(nil), d.cachedCatalog...)
+	fresh := len(catalog) > 0 && time.Since(d.cachedAt) < 10*time.Minute
+	d.modelsMu.Unlock()
+
+	if !fresh {
+		if fetched := d.fetchHubModelCatalog(ctx, hub); len(fetched) > 0 {
+			catalog = fetched
+			d.modelsMu.Lock()
+			d.cachedCatalog = fetched
+			if len(d.cachedModel) == 0 {
+				d.cachedModel = catalogToOptions(fetched)
+			}
+			d.cachedAt = time.Now()
+			d.modelsMu.Unlock()
+		}
+	}
+
+	for _, entry := range catalog {
+		if strings.EqualFold(model, entry.ID) ||
+			strings.EqualFold(model, entry.Label) ||
+			strings.EqualFold(model, entry.ModelOrAlias["model"]) ||
+			strings.EqualFold(model, entry.ModelOrAlias["alias"]) {
+			if len(entry.ModelOrAlias) > 0 {
+				copyMap := make(map[string]string, len(entry.ModelOrAlias))
+				for k, v := range entry.ModelOrAlias {
+					copyMap[k] = v
+				}
+				return copyMap
+			}
+		}
+	}
+
+	return map[string]string{"model": model}
+}
+
+func (d *Dispatcher) fetchHubModelCatalog(ctx context.Context, hub HubInfo) []modelCatalogEntry {
+	subCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+
+	var res struct {
+		ClientModelConfigs []struct {
+			Label        string            `json:"label"`
+			ModelID      string            `json:"modelId"`
+			ModelOrAlias map[string]string `json:"modelOrAlias"`
+		} `json:"clientModelConfigs"`
+	}
+	if err := d.callHubRPC(subCtx, hub, "GetCascadeModelConfigData", map[string]any{}, &res); err != nil {
+		return nil
+	}
+	var out []modelCatalogEntry
+	for _, cfg := range res.ClientModelConfigs {
+		id := strings.TrimSpace(cfg.ModelID)
+		if id == "" {
+			id = strings.TrimSpace(cfg.ModelOrAlias["model"])
+		}
+		if id == "" {
+			id = strings.TrimSpace(cfg.ModelOrAlias["alias"])
+		}
+		if id == "" {
+			continue
+		}
+		out = append(out, modelCatalogEntry{
+			ID:           id,
+			Label:        strings.TrimSpace(cfg.Label),
+			ModelOrAlias: cfg.ModelOrAlias,
+		})
+	}
+	return out
+}
+
+func catalogToOptions(catalog []modelCatalogEntry) []ModelOption {
+	out := make([]ModelOption, 0, len(catalog))
+	for _, e := range catalog {
+		if strings.HasSuffix(e.ID, "-disabled") {
+			continue
+		}
+		label := e.Label
+		if label == "" {
+			label = e.ID
+		}
+		out = append(out, ModelOption{ID: e.ID, Label: label})
+	}
+	return out
 }
 
 // RespondInteraction forwards an approval/rejection decision to the live Hub RPC.
@@ -329,7 +525,7 @@ func (d *Dispatcher) RespondInteraction(ctx context.Context, cascadeID string, r
 	return d.callHubRPC(ctx, hub, "HandleCascadeUserInteraction", payload, nil)
 }
 
-// ListModels returns available models via `agy models`, cached for 10 minutes.
+// ListModels returns available models from a live Hub (preferred) or `agy models`, cached for 10 minutes.
 func (d *Dispatcher) ListModels(ctx context.Context) []ModelOption {
 	d.modelsMu.Lock()
 	if len(d.cachedModel) > 0 && time.Since(d.cachedAt) < 10*time.Minute {
@@ -338,6 +534,19 @@ func (d *Dispatcher) ListModels(ctx context.Context) []ModelOption {
 		return out
 	}
 	d.modelsMu.Unlock()
+
+	if hubs, err := DiscoverHubs(ctx, d.antigravityDir); err == nil && len(hubs) > 0 {
+		if catalog := d.fetchHubModelCatalog(ctx, hubs[0]); len(catalog) > 0 {
+			if opts := catalogToOptions(catalog); len(opts) > 0 {
+				d.modelsMu.Lock()
+				d.cachedCatalog = catalog
+				d.cachedModel = opts
+				d.cachedAt = time.Now()
+				d.modelsMu.Unlock()
+				return opts
+			}
+		}
+	}
 
 	agyBin := FindAgyBinary()
 	if agyBin == "" {
