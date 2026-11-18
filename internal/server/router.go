@@ -52,6 +52,16 @@ func NewRouter(deps Dependencies) http.Handler {
 		if deps.Dispatcher == nil {
 			deps.Dispatcher = agy.NewDispatcher(deps.Config.AntigravityDir)
 		}
+		if deps.Dispatcher != nil && deps.Audit != nil {
+			deps.Dispatcher.SetErrorLogger(func(event, detail string) {
+				deps.Audit.Log(security.AuditEvent{
+					Event:    event,
+					ClientIP: "127.0.0.1",
+					Outcome:  "error",
+					Detail:   detail,
+				})
+			})
+		}
 		if deps.PreviewProxy == nil {
 			deps.PreviewProxy = proxy.NewPreviewProxyHandler(deps.Config.Port)
 		}
