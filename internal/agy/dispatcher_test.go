@@ -113,3 +113,127 @@ func TestDispatcherHubRPC(t *testing.T) {
 		t.Fatalf("RespondInteraction failed: err=%v gotInteract=%v", err, gotInteract)
 	}
 }
+
+func TestDispatcherHubRPCForwardsModeAndModel(t *testing.T) {
+	var capturedPayload struct {
+		CascadeID     string `json:"cascadeId"`
+		CascadeConfig *struct {
+			PlannerConfig *struct {
+				RequestedModel map[string]string `json:"requestedModel"`
+				Conversational *struct {
+					PlannerMode string `json:"plannerMode"`
+					AgenticMode bool   `json:"agenticMode"`
+				} `json:"conversational"`
+			} `json:"plannerConfig"`
+		} `json:"cascadeConfig"`
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/healthz":
+			w.WriteHeader(http.StatusOK)
+		case "/exa.language_server_pb.LanguageServerService/GetCascadeModelConfigData":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"clientModelConfigs": []map[string]any{
+					{
+						"label":        "Gemini 4 Argon (Medium)",
+						"modelId":      "gemini-4-argon-medium",
+						"modelOrAlias": map[string]string{"model": "MODEL_PLACEHOLDER_M418"},
+					},
+					{
+						"label":        "Gemini 4 Carbon",
+						"modelId":      "gemini-4-carbon-disabled",
+						"modelOrAlias": map[string]string{"model": "MODEL_PLACEHOLDER_M670"},
+					},
+				},
+			})
+		case "/exa.language_server_pb.LanguageServerService/SendUserCascadeMessage":
+			_ = json.NewDecoder(r.Body).Decode(&capturedPayload)
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	_, portStr, _ := net.SplitHostPort(srv.Listener.Addr().String())
+	port, _ := strconv.Atoi(portStr)
+
+	agDir := t.TempDir()
+	daemonDir := filepath.Join(agDir, "daemon")
+	_ = os.MkdirAll(daemonDir, 0o755)
+	hubJSON, _ := json.Marshal(HubInfo{
+		PID:       os.Getpid(),
+		HTTPPort:  port,
+		LSVersion: "2.31.2",
+		CSRFToken: "hub-secret-csrf",
+	})
+	_ = os.WriteFile(filepath.Join(daemonDir, "hub_"+portStr+".json"), hubJSON, 0o644)
+
+	disp := NewDispatcher(agDir)
+
+	models := disp.ListModels(context.Background())
+	if len(models) != 1 || models[0].ID != "gemini-4-argon-medium" {
+		t.Fatalf("expected 1 active model from Hub catalog, got %+v", models)
+	}
+
+	_, via, err := disp.SendPrompt(context.Background(), PromptRequest{
+		ConversationID: "conv-plan",
+		Prompt:         "Draft architecture plan",
+		Mode:           "plan",
+		Model:          "gemini-4-argon-medium",
+	})
+	if err != nil || via != "hub_rpc" {
+		t.Fatalf("SendPrompt(plan) failed: via=%q err=%v", via, err)
+	}
+	if capturedPayload.CascadeConfig == nil || capturedPayload.CascadeConfig.PlannerConfig == nil {
+		t.Fatalf("expected cascadeConfig.plannerConfig in RPC payload, got nil")
+	}
+	pc := capturedPayload.CascadeConfig.PlannerConfig
+	if pc.RequestedModel["model"] != "MODEL_PLACEHOLDER_M418" {
+		t.Fatalf("expected MODEL_PLACEHOLDER_M418, got %+v", pc.RequestedModel)
+	}
+	if pc.Conversational == nil || pc.Conversational.PlannerMode != "CONVERSATIONAL_PLANNER_MODE_READ_ONLY" {
+		t.Fatalf("expected CONVERSATIONAL_PLANNER_MODE_READ_ONLY for plan mode, got %+v", pc.Conversational)
+	}
+
+	_, via, err = disp.SendPrompt(context.Background(), PromptRequest{
+		ConversationID: "conv-auto",
+		Prompt:         "Apply edit",
+		Mode:           "auto",
+		Model:          "auto",
+	})
+	if err != nil || via != "hub_rpc" {
+		t.Fatalf("SendPrompt(auto) failed: via=%q err=%v", via, err)
+	}
+	pc = capturedPayload.CascadeConfig.PlannerConfig
+	if pc.RequestedModel["alias"] != "MODEL_ALIAS_AUTO" {
+		t.Fatalf("expected MODEL_ALIAS_AUTO, got %+v", pc.RequestedModel)
+	}
+	if pc.Conversational == nil || pc.Conversational.PlannerMode != "CONVERSATIONAL_PLANNER_MODE_DEFAULT" || !pc.Conversational.AgenticMode {
+		t.Fatalf("expected CONVERSATIONAL_PLANNER_MODE_DEFAULT with agenticMode=true, got %+v", pc.Conversational)
+	}
+}
+
+func TestDispatcherLimitedBufferAndErrorLogger(t *testing.T) {
+	lb := &limitedBuffer{max: 10}
+	n, err := lb.Write([]byte("1234567890abcdef"))
+	if err != nil || n != 16 {
+		t.Fatalf("unexpected write result: n=%d err=%v", n, err)
+	}
+	if lb.buf.String() != "1234567890" {
+		t.Fatalf("expected capped output '1234567890', got %q", lb.buf.String())
+	}
+
+	disp := NewDispatcher(t.TempDir())
+	var gotEvent, gotDetail string
+	disp.SetErrorLogger(func(event, detail string) {
+		gotEvent = event
+		gotDetail = detail
+	})
+	disp.logAsyncError("cli_fallback_failed", "exit status 1 stderr=boom")
+	if gotEvent != "cli_fallback_failed" || gotDetail != "exit status 1 stderr=boom" {
+		t.Fatalf("unexpected error logger capture: event=%q detail=%q", gotEvent, gotDetail)
+	}
+}
